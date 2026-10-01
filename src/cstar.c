@@ -138,7 +138,9 @@ void parse_and_gen(FILE* out) {
                         arg_pos = 1;
                         var_name[0] = '\0';
                         format[fmt_pos++] = '%';
-                        format[fmt_pos++] = 'd';
+                    format[fmt_pos++] = 'l';
+                    format[fmt_pos++] = 'l';
+                    format[fmt_pos++] = 'u';
                         pos++; continue;
                     }
                     if (in_var) {
