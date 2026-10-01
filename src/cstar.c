@@ -4,29 +4,27 @@
 #include <ctype.h>
 #include <stdbool.h>
 
-// 1. Token 定义
 typedef enum { TOK_EOF, TOK_IDENT, TOK_NUMBER, TOK_STRING, TOK_SYMBOL } TokenType;
 typedef struct { TokenType type; char text[256]; } Token;
 
 Token tokens[10000];
 int token_count = 0;
 
-// 2. 极简词法分析器（绝对安全）
 void lex(const char* src) {
     int i = 0;
     while (src[i] != '\0') {
         if (isspace(src[i])) { i++; continue; }
-        if (src[i] == '"') { // 字符串
+        if (src[i] == '"') {
             int len = 0;
             tokens[token_count].type = TOK_STRING;
-            tokens[token_count].text[len++] = src[i++]; // 包含开头的引号
+            tokens[token_count].text[len++] = src[i++];
             while (src[i] != '"' && src[i] != '\0') tokens[token_count].text[len++] = src[i++];
-            if (src[i] == '"') tokens[token_count].text[len++] = src[i++]; // 包含结尾的引号
+            if (src[i] == '"') tokens[token_count].text[len++] = src[i++];
             tokens[token_count].text[len] = '\0';
             token_count++;
             continue;
         }
-        if (isalpha(src[i]) || src[i] == '_') { // 标识符
+        if (isalpha(src[i]) || src[i] == '_') {
             int len = 0;
             tokens[token_count].type = TOK_IDENT;
             while (isalnum(src[i]) || src[i] == '_') tokens[token_count].text[len++] = src[i++];
@@ -34,7 +32,7 @@ void lex(const char* src) {
             token_count++;
             continue;
         }
-        if (isdigit(src[i])) { // 数字
+        if (isdigit(src[i])) {
             int len = 0;
             tokens[token_count].type = TOK_NUMBER;
             while (isdigit(src[i])) tokens[token_count].text[len++] = src[i++];
@@ -42,7 +40,6 @@ void lex(const char* src) {
             token_count++;
             continue;
         }
-        // 符号（单字符）
         tokens[token_count].type = TOK_SYMBOL;
         tokens[token_count].text[0] = src[i++];
         tokens[token_count].text[1] = '\0';
@@ -51,46 +48,147 @@ void lex(const char* src) {
     tokens[token_count].type = TOK_EOF;
 }
 
-// 3. 极简代码生成器（遍历 Token，遇到关键字就输出 C 代码）
 void parse_and_gen(FILE* out) {
-    fprintf(out, "#include <stdio.h>\n#include <stdint.h>\n\n");
+    fprintf(out, "#include <stdio.h>\n#include <stdint.h>\n#include <stdlib.h>\n\ntypedef uint64_t u64;\ntypedef uint8_t u8;\n\n");
+    
     for (int i = 0; i < token_count; i++) {
         char* t = tokens[i].text;
-        if (strcmp(t, "fn") == 0) {
-            // 寻找函数名
-            if (tokens[i+1].type == TOK_IDENT) {
-                fprintf(out, "int %s() {\n", tokens[i+1].text);
-                i += 1;
+        
+        // 1. struct 结构体
+        if (strcmp(t, "struct") == 0 && tokens[i+1].type == TOK_IDENT) {
+            char* sname = tokens[i+1].text;
+            fprintf(out, "typedef struct %s {\n", sname);
+            i += 3; // 跳过 struct, 名字, {
+            while (tokens[i].text[0] != '}') {
+                if (tokens[i].type == TOK_IDENT && tokens[i+1].type == TOK_IDENT) {
+                    fprintf(out, "    %s %s;\n", tokens[i].text, tokens[i+1].text);
+                    i += 2;
+                } else i += 1;
             }
-        } else if (strcmp(t, "let") == 0) {
-            if (tokens[i+1].type == TOK_IDENT) {
-                fprintf(out, "    __auto_type %s = ", tokens[i+1].text);
-                i += 2; // 跳过 let 和变量名
-                while (tokens[i].text[0] != ';') {
-                    fprintf(out, "%s ", tokens[i].text);
-                    i++;
-                }
-                fprintf(out, ";\n");
-            }
-        } else if (strcmp(t, "print") == 0) {
-            i += 1; // 跳过 print
-            if (tokens[i].text[0] == '(') i += 1; // 跳过 (
-            if (tokens[i].type == TOK_STRING) {
-                char* str = tokens[i].text;
-                // 简单替换 {a} 为 %d
-                fprintf(out, "    printf(\"%s\\n\");\n", str);
-                i += 1;
-            }
-        } else if (strcmp(t, "return") == 0) {
-            fprintf(out, "    return ");
+            fprintf(out, "} %s;\n\n", sname);
+            continue;
+        }
+        
+        // 2. fn 函数声明
+        if (strcmp(t, "fn") == 0 && tokens[i+1].type == TOK_IDENT) {
+            fprintf(out, "int %s() {\n", tokens[i+1].text);
             i += 1;
-            while (tokens[i].text[0] != ';') {
+            continue;
+        }
+        
+        // 3. let 变量声明
+        if (strcmp(t, "let") == 0 && tokens[i+1].type == TOK_IDENT) {
+            fprintf(out, "    __auto_type %s = ", tokens[i+1].text);
+            i += 3; // 跳过 let, 变量名, =
+            while (tokens[i].text[0] != ';' && i < token_count) {
                 fprintf(out, "%s ", tokens[i].text);
                 i++;
             }
             fprintf(out, ";\n");
-        } else if (strcmp(t, "}") == 0) {
+            continue;
+        }
+        
+        // 4. print 打印
+        if (strcmp(t, "print") == 0) {
+            i += 1; // 跳过 print
+            if (tokens[i].text[0] == '(') i += 1; // 跳过 (
+            if (tokens[i].type == TOK_STRING) {
+                char* raw = tokens[i].text;
+                char content[256];
+                // 去掉首尾引号
+                strncpy(content, raw + 1, strlen(raw) - 2);
+                content[strlen(raw) - 2] = '\0';
+                
+                char format[256] = "";
+                char args[256] = "";
+                int pos = 0, fmt_pos = 0, arg_pos = 0;
+                bool in_var = false;
+                char var_name[64] = "";
+                int var_pos = 0;
+                
+                while (content[pos] != '\0') {
+                    if (content[pos] == '{') { in_var = true; pos++; continue; }
+                    if (content[pos] == '}') {
+                        in_var = false;
+                        // 拼接参数
+                        if (arg_pos > 0) strcat(args, ", ");
+                        strcat(args, var_name);
+                        arg_pos = 1;
+                        var_name[0] = '\0';
+                        // 在 format 里插入 %d
+                        format[fmt_pos++] = '%';
+                        format[fmt_pos++] = 'd';
+                        pos++; continue;
+                    }
+                    if (in_var) {
+                        var_name[var_pos++] = content[pos++];
+                        var_name[var_pos] = '\0';
+                    } else {
+                        format[fmt_pos++] = content[pos++];
+                    }
+                }
+                format[fmt_pos] = '\0';
+                
+                if (arg_pos > 0) fprintf(out, "    printf(\"%s\\n\", %s);\n", format, args);
+                else fprintf(out, "    printf(\"%s\\n\");\n", format);
+                i += 1; // 跳过字符串
+            }
+            continue;
+        }
+        
+        // 5. while 循环
+        if (strcmp(t, "while") == 0) {
+            char cond[256] = "";
+            i += 1;
+            while (tokens[i].text[0] != '{' && i < token_count) {
+                strcat(cond, tokens[i].text);
+                strcat(cond, " ");
+                i++;
+            }
+            fprintf(out, "    while (%s) {\n", cond);
+            continue;
+        }
+        
+        // 6. return 返回
+        if (strcmp(t, "return") == 0) {
+            fprintf(out, "    return ");
+            i += 1;
+            while (tokens[i].text[0] != ';' && i < token_count) {
+                fprintf(out, "%s ", tokens[i].text);
+                i++;
+            }
+            fprintf(out, ";\n");
+            continue;
+        }
+        
+        // 7. 赋值语句 (比如 cpu.pc = 0;)
+        if ((tokens[i].type == TOK_IDENT || t && t[0] == '(') && i + 1 < token_count) {
+            int lookahead = i;
+            bool is_assign = false;
+            while (lookahead < token_count && tokens[lookahead].text[0] != ';' && tokens[lookahead].text[0] != '{' && tokens[lookahead].text[0] != '}') {
+                if (tokens[lookahead].text[0] == '=') { is_assign = true; break; }
+                lookahead++;
+            }
+            if (is_assign) {
+                while (tokens[i].text[0] != '=') {
+                    fprintf(out, "%s", tokens[i].text);
+                    i++;
+                }
+                fprintf(out, " = ");
+                i += 1;
+                while (tokens[i].text[0] != ';' && i < token_count) {
+                    fprintf(out, "%s ", tokens[i].text);
+                    i++;
+                }
+                fprintf(out, ";\n");
+                continue;
+            }
+        }
+        
+        // 8. 右花括号
+        if (t && t[0] == '}') {
             fprintf(out, "}\n\n");
+            continue;
         }
     }
 }
@@ -102,7 +200,6 @@ int main(int argc, char** argv) {
     }
     FILE* fp = fopen(argv[1], "r");
     if (!fp) { printf("Cannot open file\n"); return 1; }
-    
     fseek(fp, 0, SEEK_END);
     long fsize = ftell(fp);
     fseek(fp, 0, SEEK_SET);
