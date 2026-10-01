@@ -19,7 +19,18 @@ def codegen(tokens):
     i = 0
     while i < len(tokens):
         kind, val = tokens[i]
-        if val == 'fn':
+        
+        # 【新增】普通赋值语句识别：IDENT = EXPR;
+        if kind == 'IDENT' and i + 1 < len(tokens) and tokens[i+1][1] == '=':
+            var_name = val
+            i += 2
+            expr_tokens = []
+            while i < len(tokens) and tokens[i][1] != ';':
+                expr_tokens.append(tokens[i][1])
+                i += 1
+            c_code += f"    {var_name} = {' '.join(expr_tokens)};\n"
+            
+        elif val == 'fn':
             i += 1
             func_name = tokens[i][1]
             i += 2
