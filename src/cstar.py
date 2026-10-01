@@ -34,27 +34,28 @@ def codegen(tokens):
     while i < len(tokens):
         kind, val = tokens[i]
 
-        # 1. 指针解引用赋值 *(ptr) = val;
-        if val == '(' and i + 1 < len(tokens) and tokens[i+1][1] == '*':
-            i += 1
-            ptr_expr, i = parse_expr(tokens, i)
-            i += 1
-            if i < len(tokens) and tokens[i][1] == '=':
-                i += 1
+        # 1. 通用赋值（支持 a = 10, *p = 42, *(ptr) = 5 等）
+        if kind in ['IDENT', 'OP'] or val == '(':
+            lookahead = i
+            is_assign = False
+            while lookahead < len(tokens) and tokens[lookahead][1] not in [';', '{', '}']:
+                if tokens[lookahead][1] == '=':
+                    is_assign = True
+                    break
+                lookahead += 1
+            
+            if is_assign:
+                lhs_tokens = []
+                while i < len(tokens) and tokens[i][1] != '=':
+                    lhs_tokens.append(tokens[i][1])
+                    i += 1
+                i += 1 # 跳过 =
                 rhs, i = parse_expr(tokens, i)
-                c_code += f"    {ptr_expr} = {rhs};\n"
-
-        # 2. 普通赋值和 *p = 42 赋值
-        elif (kind == 'IDENT' or (kind == 'OP' and val == '*')) and i + 1 < len(tokens) and tokens[i+1][1] == '=':
-            lhs_tokens = []
-            while i < len(tokens) and tokens[i][1] != '=':
-                lhs_tokens.append(tokens[i][1])
+                c_code += f"    {' '.join(lhs_tokens)} = {rhs};\n"
+            else:
                 i += 1
-            i += 1
-            rhs, i = parse_expr(tokens, i)
-            c_code += f"    {' '.join(lhs_tokens)} = {rhs};\n"
 
-        # 3. 函数声明
+        # 2. 函数声明
         elif val == 'fn':
             i += 1
             func_name = tokens[i][1]
@@ -75,7 +76,7 @@ def codegen(tokens):
             i += 2
             c_code += f"int {func_name}({', '.join(params)}) {{\n"
 
-        # 4. 变量声明
+        # 3. 变量声明
         elif val == 'let':
             i += 1
             var_name = tokens[i][1]
