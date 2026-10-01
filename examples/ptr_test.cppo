@@ -1,8 +1,5 @@
 fn main() -> int {
     let a = 10;
-    let p = &a;
-    *p = 42;
-    let val = *p;
-    print("val = {val}");
+    print("hello cstar");
     return 0;
 }
