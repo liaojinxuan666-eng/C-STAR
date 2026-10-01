@@ -1,0 +1,21 @@
+struct CPU {
+    *u64 pc;
+    *u64 sp;
+}
+
+fn main() -> int {
+    let mem = malloc(1024);
+    let cpu = malloc(sizeof(CPU));
+    
+    // 模拟映射 pc 寄存器
+    cpu.pc = mem;
+    
+    // 指针解引用写入，*(cpu.pc) = 42
+    *(cpu.pc) = 42;
+    
+    // 读取
+    let val = *(cpu.pc);
+    print("val = {val}");
+    
+    return 0;
+}
