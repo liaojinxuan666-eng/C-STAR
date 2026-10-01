@@ -7,7 +7,7 @@
 typedef enum { TOK_EOF, TOK_IDENT, TOK_NUMBER, TOK_STRING, TOK_SYMBOL } TokenType;
 typedef struct { TokenType type; char text[256]; } Token;
 
-Token tokens[10000];
+Token tokens[20000];
 int token_count = 0;
 
 void lex(const char* src) {
@@ -48,8 +48,41 @@ void lex(const char* src) {
     tokens[token_count].type = TOK_EOF;
 }
 
+void parse_function_params(FILE* out, int start_idx, int* end_idx) {
+    int i = start_idx;
+    fprintf(out, "(");
+    bool first = true;
+    while (i < token_count && tokens[i].text[0] != ')') {
+        if (tokens[i].type == TOK_IDENT) {
+            if (!first) fprintf(out, ", ");
+            first = false;
+            char* name = tokens[i].text;
+            i++;
+            if (tokens[i].text[0] == ':') i++;
+            char type_str[64] = "";
+            while (i < token_count && tokens[i].text[0] != ',' && tokens[i].text[0] != ')') {
+                strcat(type_str, tokens[i].text);
+                i++;
+            }
+            if (type_str[0] == '*') {
+                fprintf(out, "%s* %s", type_str + 1, name);
+            } else if (strstr(type_str, "*") != NULL) {
+                char base_type[64];
+                strcpy(base_type, type_str);
+                base_type[strlen(base_type)-1] = '\0';
+                fprintf(out, "%s* %s", base_type, name);
+            } else {
+                fprintf(out, "%s %s", type_str, name);
+            }
+        }
+        if (tokens[i].text[0] == ',') i++;
+    }
+    fprintf(out, ")");
+    *end_idx = i;
+}
+
 void parse_and_gen(FILE* out) {
-    fprintf(out, "#include <stdio.h>\n#include <stdint.h>\n#include <stdlib.h>\n\ntypedef uint64_t u64;\ntypedef uint8_t u8;\n\n");
+    fprintf(out, "#include <stdio.h>\n#include <stdint.h>\n#include <stdlib.h>\n\ntypedef uint64_t u64;\ntypedef uint32_t u32;\ntypedef uint8_t u8;\n\n");
     
     char struct_names[50][64];
     int s_count = 0;
@@ -57,12 +90,12 @@ void parse_and_gen(FILE* out) {
     for (int i = 0; i < token_count; i++) {
         char* t = tokens[i].text;
         
-        // 1. struct 结构体
+        // 1. struct
         if (strcmp(t, "struct") == 0 && tokens[i+1].type == TOK_IDENT) {
             char* sname = tokens[i+1].text;
             strcpy(struct_names[s_count++], sname);
             fprintf(out, "typedef struct %s {\n", sname);
-            i += 3; // 跳过 struct, 名字, {
+            i += 3;
             while (tokens[i].text[0] != '}') {
                 if (tokens[i].type == TOK_IDENT && tokens[i+1].type == TOK_IDENT) {
                     fprintf(out, "    %s %s;\n", tokens[i].text, tokens[i+1].text);
@@ -73,36 +106,33 @@ void parse_and_gen(FILE* out) {
             continue;
         }
         
-        // 2. fn 函数声明
+        // 2. fn
         if (strcmp(t, "fn") == 0 && tokens[i+1].type == TOK_IDENT) {
-            fprintf(out, "int %s() {\n", tokens[i+1].text);
-            i += 1;
+            char* func_name = tokens[i+1].text;
+            i += 2;
+            fprintf(out, "int %s", func_name);
+            parse_function_params(out, i + 1, &i);
+            while (tokens[i].text[0] != '{' && i < token_count) i++;
+            fprintf(out, " {\n");
             continue;
         }
         
-        // 3. let 变量声明（修复结构体初始化）
+        // 3. let
         if (strcmp(t, "let") == 0 && tokens[i+1].type == TOK_IDENT) {
             char* var_name = tokens[i+1].text;
             bool is_struct_init = false;
-            
-            // 检查右边是否是已知结构体名字
             if (i+3 < token_count && tokens[i+2].text[0] == '=' && tokens[i+3].type == TOK_IDENT) {
                 for (int k = 0; k < s_count; k++) {
-                    if (strcmp(tokens[i+3].text, struct_names[k]) == 0) {
-                        is_struct_init = true;
-                        break;
-                    }
+                    if (strcmp(tokens[i+3].text, struct_names[k]) == 0) { is_struct_init = true; break; }
                 }
             }
-            
             if (is_struct_init) {
-                // 生成 C 语言的结构体变量声明： CPU cpu;
                 fprintf(out, "    %s %s;\n", tokens[i+3].text, var_name);
-                i += 4; // 跳过 let, var, =, struct_name
-                while (tokens[i].text[0] != ';' && i < token_count) i++; // 跳过 ()
+                i += 4;
+                while (tokens[i].text[0] != ';' && i < token_count) i++;
             } else {
                 fprintf(out, "    __auto_type %s = ", var_name);
-                i += 3; // 跳过 let, 变量名, =
+                i += 3;
                 while (tokens[i].text[0] != ';' && i < token_count) {
                     fprintf(out, "%s ", tokens[i].text);
                     i++;
@@ -112,7 +142,7 @@ void parse_and_gen(FILE* out) {
             continue;
         }
         
-        // 4. print 打印
+        // 4. print
         if (strcmp(t, "print") == 0) {
             i += 1;
             if (tokens[i].text[0] == '(') i += 1;
@@ -121,14 +151,12 @@ void parse_and_gen(FILE* out) {
                 char content[256];
                 strncpy(content, raw + 1, strlen(raw) - 2);
                 content[strlen(raw) - 2] = '\0';
-                
                 char format[256] = "";
                 char args[256] = "";
                 int pos = 0, fmt_pos = 0, arg_pos = 0;
                 bool in_var = false;
                 char var_name[64] = "";
                 int var_pos = 0;
-                
                 while (content[pos] != '\0') {
                     if (content[pos] == '{') { in_var = true; pos++; continue; }
                     if (content[pos] == '}') {
@@ -137,21 +165,17 @@ void parse_and_gen(FILE* out) {
                         strcat(args, var_name);
                         arg_pos = 1;
                         var_name[0] = '\0';
-                        format[fmt_pos++] = '%';
-                    format[fmt_pos++] = 'l';
-                    format[fmt_pos++] = 'l';
-                    format[fmt_pos++] = 'u';
+                        // 修复 %llu
+                        format[fmt_pos++] = '%'; format[fmt_pos++] = 'l'; format[fmt_pos++] = 'l'; format[fmt_pos++] = 'u';
                         pos++; continue;
                     }
                     if (in_var) {
-                        var_name[var_pos++] = content[pos++];
-                        var_name[var_pos] = '\0';
+                        var_name[var_pos++] = content[pos++]; var_name[var_pos] = '\0';
                     } else {
                         format[fmt_pos++] = content[pos++];
                     }
                 }
                 format[fmt_pos] = '\0';
-                
                 if (arg_pos > 0) fprintf(out, "    printf(\"%s\\n\", %s);\n", format, args);
                 else fprintf(out, "    printf(\"%s\\n\");\n", format);
                 i += 1;
@@ -159,32 +183,34 @@ void parse_and_gen(FILE* out) {
             continue;
         }
         
-        // 5. while 循环
+        // 5. while
         if (strcmp(t, "while") == 0) {
             char cond[256] = "";
             i += 1;
-            while (tokens[i].text[0] != '{' && i < token_count) {
-                strcat(cond, tokens[i].text);
-                strcat(cond, " ");
-                i++;
-            }
+            while (tokens[i].text[0] != '{' && i < token_count) { strcat(cond, tokens[i].text); strcat(cond, " "); i++; }
             fprintf(out, "    while (%s) {\n", cond);
             continue;
         }
         
-        // 6. return 返回
+        // 6. if
+        if (strcmp(t, "if") == 0) {
+            char cond[256] = "";
+            i += 1;
+            while (tokens[i].text[0] != '{' && i < token_count) { strcat(cond, tokens[i].text); strcat(cond, " "); i++; }
+            fprintf(out, "    if (%s) {\n", cond);
+            continue;
+        }
+        
+        // 7. return
         if (strcmp(t, "return") == 0) {
             fprintf(out, "    return ");
             i += 1;
-            while (tokens[i].text[0] != ';' && i < token_count) {
-                fprintf(out, "%s ", tokens[i].text);
-                i++;
-            }
+            while (tokens[i].text[0] != ';' && i < token_count) { fprintf(out, "%s ", tokens[i].text); i++; }
             fprintf(out, ";\n");
             continue;
         }
         
-        // 7. 赋值语句
+        // 8. 赋值
         if ((tokens[i].type == TOK_IDENT || t[0] == '(') && i + 1 < token_count) {
             int lookahead = i;
             bool is_assign = false;
@@ -193,34 +219,38 @@ void parse_and_gen(FILE* out) {
                 lookahead++;
             }
             if (is_assign) {
-                while (tokens[i].text[0] != '=') {
-                    fprintf(out, "%s", tokens[i].text);
-                    i++;
-                }
+                while (tokens[i].text[0] != '=') { fprintf(out, "%s", tokens[i].text); i++; }
                 fprintf(out, " = ");
                 i += 1;
-                while (tokens[i].text[0] != ';' && i < token_count) {
-                    fprintf(out, "%s ", tokens[i].text);
-                    i++;
-                }
+                while (tokens[i].text[0] != ';' && i < token_count) { fprintf(out, "%s ", tokens[i].text); i++; }
                 fprintf(out, ";\n");
                 continue;
             }
         }
         
-        // 8. 右花括号
-        if (t && t[0] == '}') {
-            fprintf(out, "}\n\n");
+        // 9. 独立函数调用 execute(inst, &cpu);
+        if (tokens[i].type == TOK_IDENT && i + 1 < token_count && tokens[i+1].text[0] == '(') {
+            fprintf(out, "    ");
+            while (tokens[i].text[0] != ';' && i < token_count) { fprintf(out, "%s ", tokens[i].text); i++; }
+            fprintf(out, ";\n");
+            continue;
+        }
+        
+        // 10. 右花括号
+        if (t &&  t[0] == '}')的性能 {
+            if (i + 1 < token_count && strcmp(tokens[i+1].text, "else") == 0) {
+                fprintf(out, "    } else {\n");
+                i++;
+            } else {
+                fprintf(out, "}\n\n");
+            }
             continue;
         }
     }
 }
 
 int main(int argc, char** argv) {
-    if (argc < 2) {
-        printf("Usage: %s <file.cppo>\n", argv[0]);
-        return 1;
-    }
+    if (argc < 2) { printf("Usage: %s <file.cppo>\n", argv[0]); return 1; }
     FILE* fp = fopen(argv[1], "r");
     if (!fp) { printf("Cannot open file\n"); return 1; }
     fseek(fp, 0, SEEK_END);
@@ -230,14 +260,11 @@ int main(int argc, char** argv) {
     fread(src, 1, fsize, fp);
     src[fsize] = '\0';
     fclose(fp);
-
     lex(src);
     free(src);
-
     FILE* out = fopen("output.c", "w");
     parse_and_gen(out);
     fclose(out);
-
     printf("[C* Compiler in C] 编译成功，生成 output.c\n");
     return 0;
 }

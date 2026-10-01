@@ -3,13 +3,23 @@ struct CPU {
     u64 x0;
 }
 
+fn execute(inst: u32, cpu: CPU*) -> int {
+    if inst == 1 {
+        cpu.x0 = cpu.x0 + 5;
+    } else {
+        cpu.x0 = cpu.x0 + 1;
+    }
+    return 0;
+}
+
 fn main() -> int {
     let cpu = CPU();
     cpu.pc = 0;
     cpu.x0 = 0;
 
     while cpu.pc < 12 {
-        cpu.x0 = cpu.x0 + 5;
+        let inst = 1;
+        execute(inst, &cpu);
         cpu.pc = cpu.pc + 4;
     }
     
