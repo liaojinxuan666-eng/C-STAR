@@ -17,7 +17,7 @@ def lexer(source):
 def parse_expr(tokens, i):
     expr = []
     depth = 0
-    start_i = i  # <--- 新增：记录起始位置
+    start_i = i
     while i < len(tokens):
         k, v = tokens[i]
         if v in ['(', '[']: depth += 1
@@ -27,7 +27,7 @@ def parse_expr(tokens, i):
         elif v == ';' and depth == 0: break
         expr.append(v)
         i += 1
-    # 新增：如果 i 没有推进，强制让它向前走一步，防止死循环
+    # 强制推进，防止死循环
     if i == start_i and i < len(tokens):
         i += 1
     return ' '.join(expr), i
@@ -100,7 +100,7 @@ def codegen(tokens):
         elif val == '}':
             c_code += "    }\n\n"
 
-        # 4. 通用赋值（放在最后，支持 a = 10, *p = 42 等）
+        # 4. 通用赋值
         elif kind in ['IDENT', 'OP'] or val == '(':
             lookahead = i
             is_assign = False
@@ -115,13 +115,15 @@ def codegen(tokens):
                 while i < len(tokens) and tokens[i][1] != '=':
                     lhs_tokens.append(tokens[i][1])
                     i += 1
-                i += 1 # 跳过 =
+                i += 1
                 rhs, i = parse_expr(tokens, i)
                 c_code += f"    {' '.join(lhs_tokens)} = {rhs};\n"
             else:
                 i += 1
         else:
+            # 最后的保底，绝对不让主循环卡死
             i += 1
+            
     return c_code
 
 if __name__ == '__main__':
