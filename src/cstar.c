@@ -51,12 +51,16 @@ void lex(const char* src) {
 void parse_and_gen(FILE* out) {
     fprintf(out, "#include <stdio.h>\n#include <stdint.h>\n#include <stdlib.h>\n\ntypedef uint64_t u64;\ntypedef uint8_t u8;\n\n");
     
+    char struct_names[50][64];
+    int s_count = 0;
+    
     for (int i = 0; i < token_count; i++) {
         char* t = tokens[i].text;
         
         // 1. struct 结构体
         if (strcmp(t, "struct") == 0 && tokens[i+1].type == TOK_IDENT) {
             char* sname = tokens[i+1].text;
+            strcpy(struct_names[s_count++], sname);
             fprintf(out, "typedef struct %s {\n", sname);
             i += 3; // 跳过 struct, 名字, {
             while (tokens[i].text[0] != '}') {
@@ -76,26 +80,45 @@ void parse_and_gen(FILE* out) {
             continue;
         }
         
-        // 3. let 变量声明
+        // 3. let 变量声明（修复结构体初始化）
         if (strcmp(t, "let") == 0 && tokens[i+1].type == TOK_IDENT) {
-            fprintf(out, "    __auto_type %s = ", tokens[i+1].text);
-            i += 3; // 跳过 let, 变量名, =
-            while (tokens[i].text[0] != ';' && i < token_count) {
-                fprintf(out, "%s ", tokens[i].text);
-                i++;
+            char* var_name = tokens[i+1].text;
+            bool is_struct_init = false;
+            
+            // 检查右边是否是已知结构体名字
+            if (i+3 < token_count && tokens[i+2].text[0] == '=' && tokens[i+3].type == TOK_IDENT) {
+                for (int k = 0; k < s_count; k++) {
+                    if (strcmp(tokens[i+3].text, struct_names[k]) == 0) {
+                        is_struct_init = true;
+                        break;
+                    }
+                }
             }
-            fprintf(out, ";\n");
+            
+            if (is_struct_init) {
+                // 生成 C 语言的结构体变量声明： CPU cpu;
+                fprintf(out, "    %s %s;\n", tokens[i+3].text, var_name);
+                i += 4; // 跳过 let, var, =, struct_name
+                while (tokens[i].text[0] != ';' && i < token_count) i++; // 跳过 ()
+            } else {
+                fprintf(out, "    __auto_type %s = ", var_name);
+                i += 3; // 跳过 let, 变量名, =
+                while (tokens[i].text[0] != ';' && i < token_count) {
+                    fprintf(out, "%s ", tokens[i].text);
+                    i++;
+                }
+                fprintf(out, ";\n");
+            }
             continue;
         }
         
         // 4. print 打印
         if (strcmp(t, "print") == 0) {
-            i += 1; // 跳过 print
-            if (tokens[i].text[0] == '(') i += 1; // 跳过 (
+            i += 1;
+            if (tokens[i].text[0] == '(') i += 1;
             if (tokens[i].type == TOK_STRING) {
                 char* raw = tokens[i].text;
                 char content[256];
-                // 去掉首尾引号
                 strncpy(content, raw + 1, strlen(raw) - 2);
                 content[strlen(raw) - 2] = '\0';
                 
@@ -110,12 +133,10 @@ void parse_and_gen(FILE* out) {
                     if (content[pos] == '{') { in_var = true; pos++; continue; }
                     if (content[pos] == '}') {
                         in_var = false;
-                        // 拼接参数
                         if (arg_pos > 0) strcat(args, ", ");
                         strcat(args, var_name);
                         arg_pos = 1;
                         var_name[0] = '\0';
-                        // 在 format 里插入 %d
                         format[fmt_pos++] = '%';
                         format[fmt_pos++] = 'd';
                         pos++; continue;
@@ -131,7 +152,7 @@ void parse_and_gen(FILE* out) {
                 
                 if (arg_pos > 0) fprintf(out, "    printf(\"%s\\n\", %s);\n", format, args);
                 else fprintf(out, "    printf(\"%s\\n\");\n", format);
-                i += 1; // 跳过字符串
+                i += 1;
             }
             continue;
         }
@@ -161,8 +182,8 @@ void parse_and_gen(FILE* out) {
             continue;
         }
         
-        // 7. 赋值语句 (比如 cpu.pc = 0;)
-        if ((tokens[i].type == TOK_IDENT || t && t[0] == '(') && i + 1 < token_count) {
+        // 7. 赋值语句
+        if ((tokens[i].type == TOK_IDENT || t[0] == '(') && i + 1 < token_count) {
             int lookahead = i;
             bool is_assign = false;
             while (lookahead < token_count && tokens[lookahead].text[0] != ';' && tokens[lookahead].text[0] != '{' && tokens[lookahead].text[0] != '}') {
