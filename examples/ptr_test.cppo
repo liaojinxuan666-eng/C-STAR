@@ -1,5 +1,19 @@
+struct CPU {
+    u64 pc;
+    u64 x0;
+}
+
 fn main() -> int {
-    let a = 42;
-    print("hello cstar, a = {a}");
+    let cpu = CPU();
+    cpu.pc = 0;
+    cpu.x0 = 0;
+
+    while cpu.pc < 12 {
+        cpu.x0 = cpu.x0 + 5;
+        cpu.pc = cpu.pc + 4;
+    }
+    
+    print("Final PC = {cpu.pc}");
+    print("Final X0 = {cpu.x0}");
     return 0;
 }
