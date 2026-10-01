@@ -34,29 +34,8 @@ def codegen(tokens):
     while i < len(tokens):
         kind, val = tokens[i]
 
-        # 1. 通用赋值（支持 a = 10, *p = 42, *(ptr) = 5 等）
-        if kind in ['IDENT', 'OP'] or val == '(':
-            lookahead = i
-            is_assign = False
-            while lookahead < len(tokens) and tokens[lookahead][1] not in [';', '{', '}']:
-                if tokens[lookahead][1] == '=':
-                    is_assign = True
-                    break
-                lookahead += 1
-            
-            if is_assign:
-                lhs_tokens = []
-                while i < len(tokens) and tokens[i][1] != '=':
-                    lhs_tokens.append(tokens[i][1])
-                    i += 1
-                i += 1 # 跳过 =
-                rhs, i = parse_expr(tokens, i)
-                c_code += f"    {' '.join(lhs_tokens)} = {rhs};\n"
-            else:
-                i += 1
-
-        # 2. 函数声明
-        elif val == 'fn':
+        # 1. 函数声明
+        if val == 'fn':
             i += 1
             func_name = tokens[i][1]
             i += 2
@@ -76,7 +55,7 @@ def codegen(tokens):
             i += 2
             c_code += f"int {func_name}({', '.join(params)}) {{\n"
 
-        # 3. 变量声明
+        # 2. 变量声明 (必须放在通用赋值前面)
         elif val == 'let':
             i += 1
             var_name = tokens[i][1]
@@ -84,27 +63,24 @@ def codegen(tokens):
             rhs, i = parse_expr(tokens, i)
             c_code += f"    __auto_type {var_name} = {rhs};\n"
 
+        # 3. 控制流
         elif val == 'if':
             i += 1
             cond, i = parse_expr(tokens, i)
             c_code += f"    if ({cond}) {{\n"
             i += 1
-
         elif val == 'while':
             i += 1
             cond, i = parse_expr(tokens, i)
             c_code += f"    while ({cond}) {{\n"
             i += 1
-
         elif val == 'else':
             c_code += "    } else {\n"
             i += 1
-
         elif val == 'return':
             i += 1
             rhs, i = parse_expr(tokens, i)
             c_code += f"    return {rhs};\n"
-
         elif val == 'print':
             i += 1
             if tokens[i][1] == '(': i += 1
@@ -117,10 +93,31 @@ def codegen(tokens):
                     c_code += f'    printf("{c_str}\\n", {", ".join(vars_in_str)});\n'
                 else:
                     c_code += f'    printf("{c_str}\\n");\n'
-
         elif val == '}':
             c_code += "    }\n\n"
-        i += 1
+
+        # 4. 通用赋值（放在最后，支持 a = 10, *p = 42 等）
+        elif kind in ['IDENT', 'OP'] or val == '(':
+            lookahead = i
+            is_assign = False
+            while lookahead < len(tokens) and tokens[lookahead][1] not in [';', '{', '}']:
+                if tokens[lookahead][1] == '=':
+                    is_assign = True
+                    break
+                lookahead += 1
+            
+            if is_assign:
+                lhs_tokens = []
+                while i < len(tokens) and tokens[i][1] != '=':
+                    lhs_tokens.append(tokens[i][1])
+                    i += 1
+                i += 1 # 跳过 =
+                rhs, i = parse_expr(tokens, i)
+                c_code += f"    {' '.join(lhs_tokens)} = {rhs};\n"
+            else:
+                i += 1
+        else:
+            i += 1
     return c_code
 
 if __name__ == '__main__':
