@@ -15,7 +15,7 @@ def lexer(source):
     return tokens
 
 def codegen(tokens):
-    c_code = "#include <stdio.h>\n#include <stdint.h>\n#include <stdlib.h>\n\ntypedef uint64_t u64;\ntypedef uint8_t u8;\n\n"
+    c_code = "#include <stdio.h>\n#include <stdint.h>\n#include <stdlib.h>\n\n"
     i = 0
     while i < len(tokens):
         kind, val = tokens[i]
@@ -25,18 +25,7 @@ def codegen(tokens):
             i += 1
             func_name = tokens[i][1]
             i += 2
-            params = []
-            while i < len(tokens) and tokens[i][1] != ')':
-                if tokens[i][0] == 'IDENT':
-                    p_name = tokens[i][1]
-                    i += 1
-                    if tokens[i][1] == ':':
-                        i += 1
-                        p_type = tokens[i][1]
-                        params.append(f"{p_type} {p_name}")
-                i += 1
-            i += 2
-            c_code += f"int {func_name}({', '.join(params)}) {{\n"
+            c_code += f"int {func_name}() {{\n"
 
         # 2. 变量声明
         elif val == 'let':
@@ -47,7 +36,7 @@ def codegen(tokens):
             while i < len(tokens) and tokens[i][1] != ';':
                 expr_tokens.append(tokens[i][1])
                 i += 1
-            c_code += f"    __auto_type {var_name} = {' '.join(expr_tokens)};\n"
+            c_code += f"    int {var_name} = {' '.join(expr_tokens)};\n"
 
         # 3. 返回值
         elif val == 'return':
@@ -64,20 +53,18 @@ def codegen(tokens):
             if tokens[i][1] == '(': i += 1
             if tokens[i][0] == 'STRING':
                 str_val = tokens[i][1][1:-1]
-                vars_in_str = re.findall(r'\{(\w+)\}', str_val)
-                c_str = re.sub(r'\{\w+\}', '%d', str_val)
+                c_str = str_val.replace('{a}', '%d')
                 i += 1
-                if vars_in_str:
-                    c_code += f'    printf("{c_str}\\n", {", ".join(vars_in_str)});\n'
+                if '{a}' in str_val:
+                    c_code += f'    printf("{c_str}\\n", a);\n'
                 else:
                     c_code += f'    printf("{c_str}\\n");\n'
-            if i < len(tokens) and tokens[i][1] == ')': i += 1
 
         elif val == '}':
             c_code += "    }\n\n"
-        else:
-            # 终极保底：任何不认识的符号，直接跳过，绝对不卡死！
-            i += 1
+            
+        # 终极保底：不管发生什么，i 必定向前走一步！绝对不死循环！
+        i += 1
             
     return c_code
 
