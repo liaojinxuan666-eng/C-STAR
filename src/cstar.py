@@ -5,7 +5,6 @@ def lexer(source):
     tokens = []
     token_spec = [
         ('STRING', r'".*?"'), ('NUMBER', r'\d+'), ('IDENT', r'[a-zA-Z_]\w*'),
-        # 关键：加入了对点号 '.' 的支持，用于 cpu.pc 这种成员访问
         ('OP', r'==|!=|<=|>=|\+=|-=|\*=|/=|->|[+\-*/=<>!{};:,&\[\].]'),
         ('BRACE', r'[()]'), ('SKIP', r'[ \t\n]+'),
     ]
@@ -15,7 +14,6 @@ def lexer(source):
             tokens.append((mo.lastgroup, mo.group()))
     return tokens
 
-# 绝对安全的代码收集器：收集直到遇到指定的停止符
 def collect_until(tokens, i, stop_tokens):
     res = []
     while i < len(tokens) and tokens[i][1] not in stop_tokens:
@@ -30,26 +28,21 @@ def codegen(tokens):
     while i < len(tokens):
         kind, val = tokens[i]
 
-        # 1. 结构体声明 (struct CPU { ... })
+        # 1. 结构体声明 (改进版，严格识别 类型 变量名)
         if val == 'struct':
             i += 1
             struct_name = tokens[i][1]
             known_structs.add(struct_name)
-            i += 1  # 跳过 {
+            i += 2 # 跳过 { 
             c_code += f"typedef struct {struct_name} {{\n"
-            i += 1
             while i < len(tokens) and tokens[i][1] != '}':
-                if tokens[i][0] in ['IDENT', 'OP'] and tokens[i][1] not in ['{', '}']:
-                    c_code += f"    {tokens[i][1]} "
-                    i += 1
-                    if i < len(tokens) and tokens[i][0] == 'IDENT':
-                        c_code += f"{tokens[i][1]};\n"
-                        i += 1
+                if tokens[i][0] == 'IDENT' and i + 1 < len(tokens) and tokens[i+1][0] == 'IDENT':
+                    c_code += f"    {tokens[i][1]} {tokens[i+1][1]};\n"
+                    i += 2
                 else:
                     i += 1
             c_code += f"}} {struct_name};\n\n"
-            i += 1  # 跳过 }
-            i += 1  # 跳过 ; （如果有）
+            i += 1 # 跳过 }
 
         # 2. 函数声明
         elif val == 'fn':
@@ -58,17 +51,14 @@ def codegen(tokens):
             i += 2
             c_code += f"int {func_name}() {{\n"
 
-        # 3. 变量声明 (支持 let cpu = CPU(); 和 let a = 10;)
+        # 3. 变量声明 (识别结构体初始化)
         elif val == 'let':
             i += 1
             var_name = tokens[i][1]
-            i += 2  # 跳过 =
-            # 特判结构体初始化：如果类型是已知结构体，生成 C 结构体变量
+            i += 2 # 跳过 =
             if tokens[i][0] == 'IDENT' and tokens[i][1] in known_structs:
                 c_code += f"    {tokens[i][1]} {var_name};\n"
-                # 跳过 CPU ( ) ;
-                while i < len(tokens) and tokens[i][1] != ';':
-                    i += 1
+                while i < len(tokens) and tokens[i][1] != ';': i += 1
             else:
                 expr, i = collect_until(tokens, i, [';'])
                 c_code += f"    __auto_type {var_name} = {expr};\n"
@@ -78,22 +68,20 @@ def codegen(tokens):
             i += 1
             cond, i = collect_until(tokens, i, ['{'])
             c_code += f"    while ({cond}) {{\n"
-            i += 1  # 跳过 {
+            i += 1 # 跳过 {
 
         # 5. if 分支
         elif val == 'if':
             i += 1
             cond, i = collect_until(tokens, i, ['{'])
             c_code += f"    if ({cond}) {{\n"
-            i += 1  # 跳过 {
-
+            i += 1 # 跳过 {
         elif val == 'else':
             c_code += "    } else {\n"
             i += 1
 
         # 6. 赋值语句 (cpu.pc = 100;)
         elif (kind == 'IDENT' or val == '(') and i + 1 < len(tokens):
-            # 向前寻找 = 号，但限制在分号前，绝对安全
             lookahead = i
             is_assign = False
             while lookahead < len(tokens) and tokens[lookahead][1] not in [';', '{', '}']:
@@ -101,22 +89,21 @@ def codegen(tokens):
                     is_assign = True
                     break
                 lookahead += 1
-            
             if is_assign:
                 lhs, i = collect_until(tokens, i, ['='])
-                i += 1  # 跳过 =
+                i += 1 # 跳过 =
                 rhs, i = collect_until(tokens, i, [';'])
                 c_code += f"    {lhs} = {rhs};\n"
             else:
                 i += 1
 
-        # 7. return 语句
+        # 7. return
         elif val == 'return':
             i += 1
             expr, i = collect_until(tokens, i, [';'])
             c_code += f"    return {expr};\n"
 
-        # 8. print 打印
+        # 8. print
         elif val == 'print':
             i += 1
             if tokens[i][1] == '(': i += 1
@@ -129,11 +116,11 @@ def codegen(tokens):
                     c_code += f'    printf("{c_str}\\n", {", ".join(vars_in_str)});\n'
                 else:
                     c_code += f'    printf("{c_str}\\n");\n'
-            if i < len(tokens) and tokens[i][1] == ')': i += 1
 
         elif val == '}':
             c_code += "    }\n\n"
-
+            
+        # 终极保底：不管发生什么，i 必定向前走一步！
         else:
             i += 1
     return c_code
