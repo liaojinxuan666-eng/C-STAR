@@ -5,6 +5,7 @@ def lexer(source):
     tokens = []
     token_spec = [
         ('STRING', r'".*?"'), ('NUMBER', r'\d+'), ('IDENT', r'[a-zA-Z_]\w*'),
+        # 支持 ==, !=, +=, ->, * 和 & 等操作符
         ('OP', r'==|!=|<=|>=|\+=|-=|\*=|/=|->|[+\-*/=<>!{};:,&\[\]]'),
         ('BRACE', r'[()]'), ('SKIP', r'[ \t\n]+'),
     ]
@@ -44,14 +45,17 @@ def codegen(tokens):
                 rhs, i = parse_expr(tokens, i)
                 c_code += f"    {ptr_expr} = {rhs};\n"
 
-        # 普通赋值
-        elif kind == 'IDENT' and i + 1 < len(tokens) and tokens[i+1][1] == '=':
-            lhs = val
-            i += 2
+        # 普通赋值和 *p = 42 赋值（支持指针解引用赋值）
+        elif (kind == 'IDENT' or (kind == 'OP' and val == '*')) and i + 1 < len(tokens) and tokens[i+1][1] == '=':
+            lhs_tokens = []
+            while i < len(tokens) and tokens[i][1] != '=':
+                lhs_tokens.append(tokens[i][1])
+                i += 1
+            i += 1 # 跳过 =
             rhs, i = parse_expr(tokens, i)
-            c_code += f"    {lhs} = {rhs};\n"
+            c_code += f"    {' '.join(lhs_tokens)} = {rhs};\n"
 
-        # 函数
+        # 函数声明
         elif val == 'fn':
             i += 1
             func_name = tokens[i][1]
@@ -72,7 +76,7 @@ def codegen(tokens):
             i += 2
             c_code += f"int {func_name}({', '.join(params)}) {{\n"
 
-        # 变量声明
+        # 变量声明（自动推导类型）
         elif val == 'let':
             i += 1
             var_name = tokens[i][1]
