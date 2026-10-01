@@ -5,9 +5,9 @@ struct CPU {
 
 fn execute(inst: u32, cpu: CPU*) -> int {
     if inst == 1 {
-        cpu.x0 = cpu.x0 + 5;
+        cpu->x0 = cpu->x0 + 5;
     } else {
-        cpu.x0 = cpu.x0 + 1;
+        cpu->x0 = cpu->x0 + 1;
     }
     return 0;
 }

@@ -40,6 +40,14 @@ void lex(const char* src) {
             token_count++;
             continue;
         }
+        // 关键修复：优先匹配双字符操作符
+        if (src[i] == '=' && src[i+1] == '=') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, "=="); token_count++; i += 2; continue; }
+        if (src[i] == '!' && src[i+1] == '=') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, "!="); token_count++; i += 2; continue; }
+        if (src[i] == '<' && src[i+1] == '=') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, "<="); token_count++; i += 2; continue; }
+        if (src[i] == '>' && src[i+1] == '=') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, ">="); token_count++; i += 2; continue; }
+        if (src[i] == '-' && src[i+1] == '>') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, "->"); token_count++; i += 2; continue; }
+        
+        // 单字符符号
         tokens[token_count].type = TOK_SYMBOL;
         tokens[token_count].text[0] = src[i++];
         tokens[token_count].text[1] = '\0';
@@ -165,7 +173,6 @@ void parse_and_gen(FILE* out) {
                         strcat(args, var_name);
                         arg_pos = 1;
                         var_name[0] = '\0';
-                        // 修复 %llu
                         format[fmt_pos++] = '%'; format[fmt_pos++] = 'l'; format[fmt_pos++] = 'l'; format[fmt_pos++] = 'u';
                         pos++; continue;
                     }
@@ -228,7 +235,7 @@ void parse_and_gen(FILE* out) {
             }
         }
         
-        // 9. 独立函数调用 execute(inst, &cpu);
+        // 9. 独立函数调用
         if (tokens[i].type == TOK_IDENT && i + 1 < token_count && tokens[i+1].text[0] == '(') {
             fprintf(out, "    ");
             while (tokens[i].text[0] != ';' && i < token_count) { fprintf(out, "%s ", tokens[i].text); i++; }
@@ -237,7 +244,7 @@ void parse_and_gen(FILE* out) {
         }
         
         // 10. 右花括号
-        if (t &&  t[0] == '}') {
+        if (t && t[0] == '}') {
             if (i + 1 < token_count && strcmp(tokens[i+1].text, "else") == 0) {
                 fprintf(out, "    } else {\n");
                 i++;
