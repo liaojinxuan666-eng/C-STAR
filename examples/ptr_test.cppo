@@ -4,11 +4,9 @@ struct CPU {
 }
 
 fn execute(inst: u32, cpu: CPU*) -> int {
-    if inst == 1 {
-        cpu->x0 = cpu->x0 + 5;
-    } else {
-        cpu->x0 = cpu->x0 + 1;
-    }
+    let mem = u8[4];
+    mem[0] = 42;
+    cpu->x0 = mem[0];
     return 0;
 }
 
