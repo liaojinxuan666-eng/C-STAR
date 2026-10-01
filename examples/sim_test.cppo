@@ -1,0 +1,18 @@
+struct Registers {
+    uint64_t x0;
+    uint64_t x1;
+    uint64_t pc;
+}
+
+fn main() -> int {
+    let count = 0;
+    while count < 3 {
+        if count == 1 {
+            print("step one");
+        } else {
+            print("other step");
+        }
+        count = count + 1;
+    }
+    return 0;
+}

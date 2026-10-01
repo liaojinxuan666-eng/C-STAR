@@ -1,61 +1,116 @@
-# src/cstar.py - C* 编译器第一版原型
 import sys
 import re
 
-# 1. 词法分析器
 def lexer(source):
     tokens = []
     token_spec = [
-        ('NUMBER',   r'\d+'),
-        ('IDENT',    r'[a-zA-Z_]\w*'),
-        ('OP',       r'[+\-*/=<>!]'),
-        ('BRACE',    r'[{}()]'),
-        ('SKIP',     r'[ \t\n]+'),
+        ('STRING', r'".*?"'), ('NUMBER', r'\d+'), ('IDENT', r'[a-zA-Z_]\w*'),
+        ('OP', r'==|!=|<=|>=|\+=|-=|\*=|/=|[+\-*/=<>!{};:,]'),
+        ('BRACE', r'[()]'), ('SKIP', r'[ \t\n]+'),
     ]
     tok_regex = '|'.join(f'(?P<{pair[0]}>{pair[1]})' for pair in token_spec)
     for mo in re.finditer(tok_regex, source):
-        kind = mo.lastgroup
-        value = mo.group()
-        if kind != 'SKIP':
-            tokens.append((kind, value))
+        if mo.lastgroup != 'SKIP':
+            tokens.append((mo.lastgroup, mo.group()))
     return tokens
 
-# 2. 语法分析 & 代码生成（C 后端）
 def codegen(tokens):
-    c_code = "#include <stdio.h>\n\n"
+    c_code = "#include <stdio.h>\n#include <stdint.h>\n\n"
     i = 0
     while i < len(tokens):
         kind, val = tokens[i]
         if val == 'fn':
             i += 1
             func_name = tokens[i][1]
-            i += 1 # 跳过 (
+            i += 2
             params = []
-            while tokens[i][1] != ')':
+            while i < len(tokens) and tokens[i][1] != ')':
                 if tokens[i][0] == 'IDENT':
-                    params.append(tokens[i][1] + " " + tokens[i+1][1])
+                    p_name = tokens[i][1]
                     i += 1
-                i += 1
-            i += 1 # 跳过 )
-            i += 1 # 跳过 ->
-            i += 1 # 跳过 int
+                    if i < len(tokens) and tokens[i][1] == ':':
+                        i += 1
+                        if i < len(tokens) and tokens[i][0] == 'IDENT':
+                            params.append(f"{tokens[i][1]} {p_name}")
+                            i += 1
+                else:
+                    i += 1
+            i += 1
+            if i < len(tokens) and tokens[i][1] == '->':
+                i += 2
             c_code += f"int {func_name}({', '.join(params)}) {{\n"
+        elif val == 'let':
+            i += 1
+            var_name = tokens[i][1]
+            i += 1
+            if tokens[i][1] == '=': i += 1
+            expr_tokens = []
+            while i < len(tokens) and tokens[i][1] != ';':
+                expr_tokens.append(tokens[i][1])
+                i += 1
+            c_code += f"    int {var_name} = {' '.join(expr_tokens)};\n"
+        elif val == 'struct':
+            i += 1
+            struct_name = tokens[i][1]
+            i += 1
+            if tokens[i][1] == '{':
+                c_code += f"typedef struct {struct_name} {{\n"
+                i += 1
+                while i < len(tokens) and tokens[i][1] != '}':
+                    if tokens[i][0] == 'IDENT':
+                        f_type = tokens[i][1]
+                        i += 1
+                        if tokens[i][0] == 'IDENT':
+                            c_code += f"    {f_type} {tokens[i][1]};\n"
+                    i += 1
+                c_code += f"}} {struct_name};\n\n"
+        elif val == 'if':
+            i += 1
+            expr_tokens = []
+            while i < len(tokens) and tokens[i][1] != '{':
+                expr_tokens.append(tokens[i][1])
+                i += 1
+            c_code += f"    if ({' '.join(expr_tokens)}) {{\n"
+        elif val == 'while':
+            i += 1
+            expr_tokens = []
+            while i < len(tokens) and tokens[i][1] != '{':
+                expr_tokens.append(tokens[i][1])
+                i += 1
+            c_code += f"    while ({' '.join(expr_tokens)}) {{\n"
+        elif val == 'else':
+            c_code += "    } else {\n"
         elif val == 'return':
             i += 1
-            c_code += f"    return {tokens[i][1]};\n"
+            expr_tokens = []
+            while i < len(tokens) and tokens[i][1] != ';':
+                expr_tokens.append(tokens[i][1])
+                i += 1
+            c_code += f"    return {' '.join(expr_tokens)};\n"
+        elif val == 'print':
+            i += 1
+            if tokens[i][1] == '(': i += 1
+            if tokens[i][0] == 'STRING':
+                str_val = tokens[i][1][1:-1]
+                vars_in_str = re.findall(r'\{(\w+)\}', str_val)
+                c_str = re.sub(r'\{\w+\}', '%d', str_val)
+                if vars_in_str:
+                    c_code += f'    printf("{c_str}\\n", {", ".join(vars_in_str)});\n'
+                else:
+                    c_code += f'    printf("{c_str}\\n");\n'
+                i += 1
+            if i < len(tokens) and tokens[i][1] == ')': i += 1
         elif val == '}':
-            c_code += "}\n\n"
+            if i + 1 < len(tokens) and tokens[i+1][1] == 'else':
+                pass
+            else:
+                c_code += "    }\n\n"
         i += 1
     return c_code
 
 if __name__ == '__main__':
-    if len(sys.argv) < 2:
-        print("Usage: python3 cstar.py <file.cppo>")
-        sys.exit(1)
     with open(sys.argv[1], 'r') as f:
         source = f.read()
-    tokens = lexer(source)
-    c_output = codegen(tokens)
     with open('output.c', 'w') as f:
-        f.write(c_output)
-    print(f"[C*] 编译成功，生成 output.c")
+        f.write(codegen(lexer(source)))
+    print("[C*] 编译成功，生成 output.c")
