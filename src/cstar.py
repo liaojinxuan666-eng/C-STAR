@@ -17,6 +17,7 @@ def lexer(source):
 def parse_expr(tokens, i):
     expr = []
     depth = 0
+    start_i = i  # <--- 新增：记录起始位置
     while i < len(tokens):
         k, v = tokens[i]
         if v in ['(', '[']: depth += 1
@@ -25,6 +26,9 @@ def parse_expr(tokens, i):
             depth -= 1
         elif v == ';' and depth == 0: break
         expr.append(v)
+        i += 1
+    # 新增：如果 i 没有推进，强制让它向前走一步，防止死循环
+    if i == start_i and i < len(tokens):
         i += 1
     return ' '.join(expr), i
 
@@ -55,7 +59,7 @@ def codegen(tokens):
             i += 2
             c_code += f"int {func_name}({', '.join(params)}) {{\n"
 
-        # 2. 变量声明 (必须放在通用赋值前面)
+        # 2. 变量声明
         elif val == 'let':
             i += 1
             var_name = tokens[i][1]
