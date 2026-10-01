@@ -1,5 +1,5 @@
 fn main() -> int {
-    let a = 10;
-    print("hello cstar");
+    let a = 42;
+    print("hello cstar, a = {a}");
     return 0;
 }
