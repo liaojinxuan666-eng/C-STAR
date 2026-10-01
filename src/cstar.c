@@ -237,7 +237,7 @@ void parse_and_gen(FILE* out) {
         }
         
         // 10. 右花括号
-        if (t &&  t[0] == '}')的性能 {
+        if (t &&  t[0] == '}') {
             if (i + 1 < token_count && strcmp(tokens[i+1].text, "else") == 0) {
                 fprintf(out, "    } else {\n");
                 i++;
