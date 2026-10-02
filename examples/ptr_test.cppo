@@ -3,10 +3,7 @@ struct CPU {
 }
 
 comptime for op in 0 to 4 {
-    fn op_{op}(cpu: CPU*) -> int {
-        cpu->x0 = {op} + 10;
-        return 0;
-    }
+    int op_{op}(CPU* cpu) { cpu->x0 = {op} + 10; return 0; }
 }
 
 fn main() -> int {

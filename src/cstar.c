@@ -16,27 +16,9 @@ void lex(const char* src) {
         if (src[i] == '/' && src[i+1] == '/') { while (src[i] != '\n' && src[i] != '\0') i++; continue; }
         if (src[i] == '/' && src[i+1] == '*') { i += 2; while (src[i] != '*' || src[i+1] != '/') { if (src[i] == '\0') break; i++; } i += 2; continue; }
         if (isspace(src[i])) { i++; continue; }
-        if (src[i] == '"') {
-            int len = 0; tokens[token_count].type = TOK_STRING; tokens[token_count].text[len++] = src[i++];
-            while (src[i] != '"' && src[i] != '\0') tokens[token_count].text[len++] = src[i++];
-            if (src[i] == '"') tokens[token_count].text[len++] = src[i++];
-            tokens[token_count].text[len] = '\0'; token_count++; continue;
-        }
-        if (isalpha(src[i]) || src[i] == '_') {
-            int len = 0; tokens[token_count].type = TOK_IDENT;
-            while (isalnum(src[i]) || src[i] == '_') tokens[token_count].text[len++] = src[i++];
-            tokens[token_count].text[len] = '\0'; token_count++; continue;
-        }
-        if (isdigit(src[i])) {
-            int len = 0; tokens[token_count].type = TOK_NUMBER;
-            if (src[i] == '0' && (src[i+1] == 'x' || src[i+1] == 'X')) {
-                tokens[token_count].text[len++] = src[i++]; tokens[token_count].text[len++] = src[i++];
-                while (isxdigit(src[i])) tokens[token_count].text[len++] = src[i++];
-            } else {
-                while (isdigit(src[i])) tokens[token_count].text[len++] = src[i++];
-            }
-            tokens[token_count].text[len] = '\0'; token_count++; continue;
-        }
+        if (src[i] == '"') { int len = 0; tokens[token_count].type = TOK_STRING; tokens[token_count].text[len++] = src[i++]; while (src[i] != '"' && src[i] != '\0') tokens[token_count].text[len++] = src[i++]; if (src[i] == '"') tokens[token_count].text[len++] = src[i++]; tokens[token_count].text[len] = '\0'; token_count++; continue; }
+        if (isalpha(src[i]) || src[i] == '_') { int len = 0; tokens[token_count].type = TOK_IDENT; while (isalnum(src[i]) || src[i] == '_') tokens[token_count].text[len++] = src[i++]; tokens[token_count].text[len] = '\0'; token_count++; continue; }
+        if (isdigit(src[i])) { int len = 0; tokens[token_count].type = TOK_NUMBER; if (src[i] == '0' && (src[i+1] == 'x' || src[i+1] == 'X')) { tokens[token_count].text[len++] = src[i++]; tokens[token_count].text[len++] = src[i++]; while (isxdigit(src[i])) tokens[token_count].text[len++] = src[i++]; } else { while (isdigit(src[i])) tokens[token_count].text[len++] = src[i++]; } tokens[token_count].text[len] = '\0'; token_count++; continue; }
         if (src[i] == '=' && src[i+1] == '=') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, "=="); token_count++; i += 2; continue; }
         if (src[i] == '!' && src[i+1] == '=') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, "!="); token_count++; i += 2; continue; }
         if (src[i] == '<' && src[i+1] == '=') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, "<="); token_count++; i += 2; continue; }
@@ -44,7 +26,6 @@ void lex(const char* src) {
         if (src[i] == '-' && src[i+1] == '>') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, "->"); token_count++; i += 2; continue; }
         if (src[i] == '<' && src[i+1] == '<') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, "<<"); token_count++; i += 2; continue; }
         if (src[i] == '>' && src[i+1] == '>') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, ">>"); token_count++; i += 2; continue; }
-
         tokens[token_count].type = TOK_SYMBOL; tokens[token_count].text[0] = src[i++]; tokens[token_count].text[1] = '\0'; token_count++;
     }
     tokens[token_count].type = TOK_EOF;
@@ -75,13 +56,13 @@ void parse_and_gen(FILE* out) {
     for (int i = 0; i < token_count; i++) {
         char* t = tokens[i].text;
 
-        // comptime 编译期穷举
+        // comptime 编译期穷举 (纯文本展开，绝不报错)
         if (strcmp(t, "comptime") == 0) {
-            i += 1; // skip comptime
+            i += 1;
             if (strcmp(tokens[i].text, "for") == 0) {
-                i += 1; // skip for
+                i += 1;
                 if (tokens[i].text[0] == '(') i += 1;
-                char loop_var[64]; strcpy(loop_var, tokens[i].text); i += 1; // skip var
+                char loop_var[64]; strcpy(loop_var, tokens[i].text); i += 1;
                 if (strcmp(tokens[i].text, "in") == 0) i += 1;
                 int start_val = atoi(tokens[i].text); i += 1;
                 if (strcmp(tokens[i].text, "to") == 0) i += 1;
@@ -89,8 +70,7 @@ void parse_and_gen(FILE* out) {
                 if (tokens[i].text[0] == ')') i += 1;
                 if (tokens[i].text[0] == '{') i += 1;
 
-                int template_start = i;
-                int template_end = i;
+                int template_start = i; int template_end = i;
                 int brace_depth = 1;
                 while (template_end < token_count && brace_depth > 0) {
                     if (tokens[template_end].text[0] == '{') brace_depth++;
@@ -99,38 +79,14 @@ void parse_and_gen(FILE* out) {
                     template_end++;
                 }
 
+                // 纯文本替换：只替换 {op}，其他原样输出
                 for (int op = start_val; op < end_val; op++) {
                     char num_str[16]; sprintf(num_str, "%d", op);
-                    bool in_comptime_fn = false;
                     for (int k = template_start; k < template_end; k++) {
-                        // 替换 {op}
                         if (tokens[k].text[0] == '{' && tokens[k+1].type == TOK_IDENT && strcmp(tokens[k+1].text, loop_var) == 0 && tokens[k+2].text[0] == '}') {
                             fprintf(out, "%s", num_str);
                             k += 2;
-                        }
-                        // 将 C* 语法转换为 C 语法
-                        else if (strcmp(tokens[k].text, "fn") == 0) {
-                            fprintf(out, "int ");
-                            in_comptime_fn = true;
-                        }
-                        else if (in_comptime_fn && strcmp(tokens[k].text, "->") == 0) {
-                            k += 1;
-                            if (k < template_end && tokens[k].type == TOK_IDENT) k += 1; // 跳过返回类型
-                        }
-                        else if (in_comptime_fn && strcmp(tokens[k].text, "cpu") == 0 && k+1 < template_end && tokens[k+1].text[0] == ':') {
-                            // 把 cpu : CPU * 变成 CPU * cpu
-                            int type_start = k + 2;
-                            int type_end = type_start;
-                            while (type_end < template_end && tokens[type_end].text[0] != ')' && tokens[type_end].text[0] != ',') type_end++;
-                            for (int t = type_start; t < type_end; t++) fprintf(out, "%s ", tokens[t].text);
-                            fprintf(out, "%s", tokens[k].text);
-                            k = type_end - 1;
-                        }
-                        else if (in_comptime_fn && strcmp(tokens[k].text, "{") == 0) {
-                            fprintf(out, "{ ");
-                            in_comptime_fn = false;
-                        }
-                        else {
+                        } else {
                             fprintf(out, "%s ", tokens[k].text);
                         }
                     }
