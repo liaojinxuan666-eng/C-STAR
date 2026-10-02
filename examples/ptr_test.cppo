@@ -1,39 +1,25 @@
 struct CPU {
-    u64 pc;
     u64 x0;
 }
 
-fn execute(inst: u32, cpu: CPU*) -> int {
-    // 模拟强制类型转换：把 u32 指针当内存用
-    let mem = u8[4];
-    mem[0] = 42;
-    mem[1] = 0;
-    mem[2] = 0;
-    mem[3] = 0;
-
-    // 强制类型转换，从内存读出 u32 (模拟取指)
-    let raw_inst = *(u32*)mem;
-
-    // 位运算：提取低 5 位 和 高 3 位（模拟解码寄存器操作数）
-    let low_5 = raw_inst & 0x1F;
-    let high_3 = (raw_inst >> 5) & 0x7;
-
-    cpu->x0 = low_5 + high_3;
-    return 0;
+comptime for op in 0 to 4 {
+    fn op_{op}(cpu: CPU*) -> int {
+        cpu->x0 = {op} + 10;
+        return 0;
+    }
 }
 
 fn main() -> int {
     let cpu = CPU();
-    cpu.pc = 0;
-    cpu.x0 = 0;
-
-    while cpu.pc < 12 {
-        let inst = 1;
-        execute(inst, &cpu);
-        cpu.pc = cpu.pc + 4;
-    }
     
-    print("Final PC = {cpu.pc}");
-    print("Final X0 = {cpu.x0}");
+    op_0(&cpu);
+    print("op_0: {cpu.x0}");
+    
+    op_1(&cpu);
+    print("op_1: {cpu.x0}");
+    
+    op_3(&cpu);
+    print("op_3: {cpu.x0}");
+    
     return 0;
 }
