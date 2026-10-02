@@ -13,6 +13,22 @@ int token_count = 0;
 void lex(const char* src) {
     int i = 0;
     while (src[i] != '\0') {
+        // Skip single line comments
+        if (src[i] == '/' && src[i+1] == '/') {
+            while (src[i] != '\n' && src[i] != '\0') i++;
+            continue;
+        }
+        // Skip multi-line comments
+        if (src[i] == '/' && src[i+1] == '*') {
+            i += 2;
+            while (src[i] != '*' || src[i+1] != '/') {
+                if (src[i] == '\0') break;
+                i++;
+            }
+            i += 2;
+            continue;
+        }
+
         if (isspace(src[i])) { i++; continue; }
         if (src[i] == '"') {
             int len = 0;
@@ -40,7 +56,8 @@ void lex(const char* src) {
             token_count++;
             continue;
         }
-        // 【修复】优先匹配位运算和双字符操作符
+        
+        // Double character operators
         if (src[i] == '=' && src[i+1] == '=') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, "=="); token_count++; i += 2; continue; }
         if (src[i] == '!' && src[i+1] == '=') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, "!="); token_count++; i += 2; continue; }
         if (src[i] == '<' && src[i+1] == '=') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, "<="); token_count++; i += 2; continue; }
@@ -49,7 +66,7 @@ void lex(const char* src) {
         if (src[i] == '<' && src[i+1] == '<') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, "<<"); token_count++; i += 2; continue; }
         if (src[i] == '>' && src[i+1] == '>') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, ">>"); token_count++; i += 2; continue; }
 
-        // 单字符符号（包含位运算 & | ^ ~ 和强制类型转换的括号）
+        // Single character symbols
         tokens[token_count].type = TOK_SYMBOL;
         tokens[token_count].text[0] = src[i++];
         tokens[token_count].text[1] = '\0';
@@ -131,7 +148,7 @@ void parse_and_gen(FILE* out) {
         if (strcmp(t, "let") == 0 && tokens[i+1].type == TOK_IDENT) {
             char* var_name = tokens[i+1].text;
 
-            // 数组声明
+            // Array declaration
             if (i+4 < token_count && tokens[i+2].text[0] == '=' && tokens[i+3].type == TOK_IDENT && tokens[i+4].text[0] == '[') {
                 fprintf(out, "    %s %s[%s];\n", tokens[i+3].text, var_name, tokens[i+5].text);
                 i += 7;
@@ -149,7 +166,7 @@ void parse_and_gen(FILE* out) {
                 i += 4;
                 while (tokens[i].text[0] != ';' && i < token_count) i++;
             } else {
-                // 普通变量
+                // Normal variable
                 fprintf(out, "    __auto_type %s = ", var_name);
                 i += 3;
                 while (tokens[i].text[0] != ';' && i < token_count) {
@@ -228,7 +245,7 @@ void parse_and_gen(FILE* out) {
             continue;
         }
         
-        // 8. 赋值 (支持强制类型转换 (u32*)ptr = ...)
+        // 8. assignment
         if ((tokens[i].type == TOK_IDENT || t[0] == '(' || t[0] == '*') && i + 1 < token_count) {
             int lookahead = i;
             bool is_assign = false;
@@ -246,7 +263,7 @@ void parse_and_gen(FILE* out) {
             }
         }
         
-        // 9. 独立函数调用
+        // 9. standalone function call
         if (tokens[i].type == TOK_IDENT && i + 1 < token_count && tokens[i+1].text[0] == '(') {
             fprintf(out, "    ");
             while (tokens[i].text[0] != ';' && i < token_count) { fprintf(out, "%s ", tokens[i].text); i++; }
@@ -254,7 +271,7 @@ void parse_and_gen(FILE* out) {
             continue;
         }
         
-        // 10. 右花括号
+        // 10. right brace
         if (t && t[0] == '}') {
             if (i + 1 < token_count && strcmp(tokens[i+1].text, "else") == 0) {
                 fprintf(out, "    } else {\n");
@@ -283,6 +300,6 @@ int main(int argc, char** argv) {
     FILE* out = fopen("output.c", "w");
     parse_and_gen(out);
     fclose(out);
-    printf("[C* Compiler in C] 编译成功，生成 output.c\n");
+    printf("[C* Compiler in C] compiled successfully, output.c generated\n");
     return 0;
 }
