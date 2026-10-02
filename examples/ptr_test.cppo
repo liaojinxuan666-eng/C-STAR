@@ -4,9 +4,21 @@ struct CPU {
 }
 
 fn execute(inst: u32, cpu: CPU*) -> int {
+    // 模拟强制类型转换：把 u32 指针当内存用
     let mem = u8[4];
     mem[0] = 42;
-    cpu->x0 = mem[0];
+    mem[1] = 0;
+    mem[2] = 0;
+    mem[3] = 0;
+
+    // 强制类型转换，从内存读出 u32 (模拟取指)
+    let raw_inst = *(u32*)mem;
+
+    // 位运算：提取低 5 位 和 高 3 位（模拟解码寄存器操作数）
+    let low_5 = raw_inst & 0x1F;
+    let high_3 = (raw_inst >> 5) & 0x7;
+
+    cpu->x0 = low_5 + high_3;
     return 0;
 }
 

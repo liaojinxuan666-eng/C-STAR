@@ -40,14 +40,16 @@ void lex(const char* src) {
             token_count++;
             continue;
         }
-        // 优先匹配双字符操作符
+        // 【修复】优先匹配位运算和双字符操作符
         if (src[i] == '=' && src[i+1] == '=') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, "=="); token_count++; i += 2; continue; }
         if (src[i] == '!' && src[i+1] == '=') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, "!="); token_count++; i += 2; continue; }
         if (src[i] == '<' && src[i+1] == '=') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, "<="); token_count++; i += 2; continue; }
         if (src[i] == '>' && src[i+1] == '=') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, ">="); token_count++; i += 2; continue; }
         if (src[i] == '-' && src[i+1] == '>') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, "->"); token_count++; i += 2; continue; }
-        
-        // 单字符符号
+        if (src[i] == '<' && src[i+1] == '<') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, "<<"); token_count++; i += 2; continue; }
+        if (src[i] == '>' && src[i+1] == '>') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, ">>"); token_count++; i += 2; continue; }
+
+        // 单字符符号（包含位运算 & | ^ ~ 和强制类型转换的括号）
         tokens[token_count].type = TOK_SYMBOL;
         tokens[token_count].text[0] = src[i++];
         tokens[token_count].text[1] = '\0';
@@ -90,7 +92,7 @@ void parse_function_params(FILE* out, int start_idx, int* end_idx) {
 }
 
 void parse_and_gen(FILE* out) {
-    fprintf(out, "#include <stdio.h>\n#include <stdint.h>\n#include <stdlib.h>\n\ntypedef uint64_t u64;\ntypedef uint32_t u32;\ntypedef uint8_t u8;\n\n");
+    fprintf(out, "#include <stdio.h>\n#include <stdint.h>\n#include <stdlib.h>\n\ntypedef uint64_t u64;\ntypedef uint32_t u32;\ntypedef uint16_t u16;\ntypedef uint8_t u8;\n\n");
     
     char struct_names[50][64];
     int s_count = 0;
@@ -129,14 +131,13 @@ void parse_and_gen(FILE* out) {
         if (strcmp(t, "let") == 0 && tokens[i+1].type == TOK_IDENT) {
             char* var_name = tokens[i+1].text;
 
-            // 【新增】数组声明： let mem = u8[1024]; 
+            // 数组声明
             if (i+4 < token_count && tokens[i+2].text[0] == '=' && tokens[i+3].type == TOK_IDENT && tokens[i+4].text[0] == '[') {
                 fprintf(out, "    %s %s[%s];\n", tokens[i+3].text, var_name, tokens[i+5].text);
-                i += 7; // 跳过 let, var, =, 类型, [, 大小, ]
+                i += 7;
                 continue;
             }
 
-            // 原有逻辑：结构体初始化
             bool is_struct_init = false;
             if (i+3 < token_count && tokens[i+2].text[0] == '=' && tokens[i+3].type == TOK_IDENT) {
                 for (int k = 0; k < s_count; k++) {
@@ -148,7 +149,7 @@ void parse_and_gen(FILE* out) {
                 i += 4;
                 while (tokens[i].text[0] != ';' && i < token_count) i++;
             } else {
-                // 原有逻辑：普通变量声明
+                // 普通变量
                 fprintf(out, "    __auto_type %s = ", var_name);
                 i += 3;
                 while (tokens[i].text[0] != ';' && i < token_count) {
@@ -227,8 +228,8 @@ void parse_and_gen(FILE* out) {
             continue;
         }
         
-        // 8. 赋值
-        if ((tokens[i].type == TOK_IDENT || t[0] == '(') && i + 1 < token_count) {
+        // 8. 赋值 (支持强制类型转换 (u32*)ptr = ...)
+        if ((tokens[i].type == TOK_IDENT || t[0] == '(' || t[0] == '*') && i + 1 < token_count) {
             int lookahead = i;
             bool is_assign = false;
             while (lookahead < token_count && tokens[lookahead].text[0] != ';' && tokens[lookahead].text[0] != '{' && tokens[lookahead].text[0] != '}') {
