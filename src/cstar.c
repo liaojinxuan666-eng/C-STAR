@@ -48,10 +48,17 @@ void lex(const char* src) {
             token_count++;
             continue;
         }
+        // 修复：识别十六进制数字 (0x1F)
         if (isdigit(src[i])) {
             int len = 0;
             tokens[token_count].type = TOK_NUMBER;
-            while (isdigit(src[i])) tokens[token_count].text[len++] = src[i++];
+            if (src[i] == '0' && (src[i+1] == 'x' || src[i+1] == 'X')) {
+                tokens[token_count].text[len++] = src[i++];
+                tokens[token_count].text[len++] = src[i++];
+                while (isxdigit(src[i])) tokens[token_count].text[len++] = src[i++];
+            } else {
+                while (isdigit(src[i])) tokens[token_count].text[len++] = src[i++];
+            }
             tokens[token_count].text[len] = '\0';
             token_count++;
             continue;
