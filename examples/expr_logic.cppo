@@ -1,0 +1,13 @@
+fn main() -> int {
+    let a = 10;
+    let b = 3;
+    let c = a * 2 + b;
+
+    if c == 23 || b != 3 {
+        print("logic: ok {c}");
+    } else {
+        print("logic: bad {c}");
+    }
+
+    return 0;
+}

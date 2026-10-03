@@ -10,12 +10,12 @@
 #define MAX_SYMBOLS 1000
 
 /*
- * C* v0.5
+ * C* v0.6
  *
- * The frontend now builds a small statement AST for ordinary runtime code.
- * Comptime templates intentionally remain token-oriented for now: this keeps
- * the proven v0.4 specialization path stable while giving v0.5 a clean
- * compiler boundary that can be expanded in later releases.
+ * The frontend now parses ordinary runtime expressions into an AST.
+ * Comptime templates intentionally remain token-oriented for now so the
+ * proven specialization path stays stable while expression handling gains
+ * real precedence, calls, member access, unary operators, and assignment.
  */
 
 typedef enum {
@@ -38,6 +38,46 @@ typedef struct {
 } Symbol;
 
 typedef enum {
+    EXPR_INT,
+    EXPR_STRING,
+    EXPR_IDENT,
+    EXPR_UNARY,
+    EXPR_BINARY,
+    EXPR_CALL,
+    EXPR_MEMBER
+} ExprKind;
+
+typedef struct Expr Expr;
+
+struct Expr {
+    ExprKind kind;
+    union {
+        long long int_val;
+        char *str_val;
+        char *ident;
+        struct {
+            char op[4];
+            Expr *operand;
+        } unary;
+        struct {
+            char op[4];
+            Expr *lhs;
+            Expr *rhs;
+        } binary;
+        struct {
+            Expr *callee;
+            Expr **args;
+            int arg_count;
+        } call;
+        struct {
+            Expr *base;
+            char *member;
+            int arrow;
+        } member;
+    } as;
+};
+
+typedef enum {
     ST_BLOCK,
     ST_LET,
     ST_RETURN,
@@ -56,25 +96,21 @@ struct Stmt {
         struct {
             char *name;
             int is_cpu_ctor;
-            int expr_start;
-            int expr_end;
+            Expr *expr;
         } let_stmt;
         struct {
-            int expr_start;
-            int expr_end;
+            Expr *expr;
         } raw_stmt;
         struct {
             int string_token;
         } print_stmt;
         struct {
-            int cond_start;
-            int cond_end;
+            Expr *cond;
             Stmt *then_body;
             Stmt *else_body;
         } if_stmt;
         struct {
-            int cond_start;
-            int cond_end;
+            Expr *cond;
             Stmt *body;
         } while_stmt;
         struct {
@@ -310,7 +346,7 @@ static void lex(const char *src) {
             continue;
         }
 
-        const char *two[] = {"==", "!=", "<=", ">=", "->", "<<", ">>", "&&", "||", "++", "--"};
+        const char *two[] = {"==", "!=", "<=", ">=", "->", "<<", ">>", "&&", "||", "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^="};
         bool matched = false;
         for (size_t k = 0; k < sizeof(two) / sizeof(two[0]); ++k) {
             if (src[i] == two[k][0] && src[i + 1] == two[k][1]) {
@@ -331,15 +367,71 @@ static void lex(const char *src) {
     tokens[token_count].line = line;
 }
 
+static Expr *new_expr(ExprKind kind) {
+    Expr *e = (Expr *)xmalloc(sizeof(*e));
+    memset(e, 0, sizeof(*e));
+    e->kind = kind;
+    return e;
+}
+
+static void free_expr(Expr *expr) {
+    if (!expr) return;
+    switch (expr->kind) {
+        case EXPR_INT:
+            break;
+        case EXPR_STRING:
+            free(expr->as.str_val);
+            break;
+        case EXPR_IDENT:
+            free(expr->as.ident);
+            break;
+        case EXPR_UNARY:
+            free_expr(expr->as.unary.operand);
+            break;
+        case EXPR_BINARY:
+            free_expr(expr->as.binary.lhs);
+            free_expr(expr->as.binary.rhs);
+            break;
+        case EXPR_CALL:
+            free_expr(expr->as.call.callee);
+            for (int i = 0; i < expr->as.call.arg_count; ++i) free_expr(expr->as.call.args[i]);
+            free(expr->as.call.args);
+            break;
+        case EXPR_MEMBER:
+            free_expr(expr->as.member.base);
+            free(expr->as.member.member);
+            break;
+    }
+    free(expr);
+}
+
 static void free_stmt_list(Stmt *stmt) {
     while (stmt) {
         Stmt *next = stmt->next;
-        if (stmt->kind == ST_LET) free(stmt->as.let_stmt.name);
-        if (stmt->kind == ST_IF) {
-            free_stmt_list(stmt->as.if_stmt.then_body);
-            free_stmt_list(stmt->as.if_stmt.else_body);
+        switch (stmt->kind) {
+            case ST_LET:
+                free(stmt->as.let_stmt.name);
+                free_expr(stmt->as.let_stmt.expr);
+                break;
+            case ST_RETURN:
+            case ST_EXPR:
+                free_expr(stmt->as.raw_stmt.expr);
+                break;
+            case ST_PRINT:
+                break;
+            case ST_IF:
+                free_expr(stmt->as.if_stmt.cond);
+                free_stmt_list(stmt->as.if_stmt.then_body);
+                free_stmt_list(stmt->as.if_stmt.else_body);
+                break;
+            case ST_WHILE:
+                free_expr(stmt->as.while_stmt.cond);
+                free_stmt_list(stmt->as.while_stmt.body);
+                break;
+            case ST_BLOCK:
+                free_stmt_list(stmt->as.block_stmt.body);
+                break;
         }
-        if (stmt->kind == ST_WHILE) free_stmt_list(stmt->as.while_stmt.body);
         free(stmt);
         stmt = next;
     }
@@ -356,6 +448,190 @@ static void append_stmt(Stmt **head, Stmt **tail, Stmt *s) {
     if (!*head) *head = s;
     else (*tail)->next = s;
     *tail = s;
+}
+
+typedef struct {
+    int pos;
+    int end;
+} ExprParser;
+
+static bool token_is_binary_operator(int i) {
+    if (i < 0 || i >= token_count) return false;
+    static const char *ops[] = {
+        "=", "+=", "-=", "*=", "/=", "%=",
+        "||", "&&", "|", "^", "&", "==", "!=",
+        "<", ">", "<=", ">=", "<<", ">>", "+", "-", "*", "/", "%"
+    };
+    for (size_t k = 0; k < sizeof(ops) / sizeof(ops[0]); ++k)
+        if (strcmp(tokens[i].text, ops[k]) == 0) return true;
+    return false;
+}
+
+static int binary_precedence(const char *op) {
+    if (strcmp(op, "=") == 0 || strcmp(op, "+=") == 0 || strcmp(op, "-=") == 0 ||
+        strcmp(op, "*=") == 0 || strcmp(op, "/=") == 0 || strcmp(op, "%=") == 0) return 1;
+    if (strcmp(op, "||") == 0) return 2;
+    if (strcmp(op, "&&") == 0) return 3;
+    if (strcmp(op, "|") == 0) return 4;
+    if (strcmp(op, "^") == 0) return 5;
+    if (strcmp(op, "&") == 0) return 6;
+    if (strcmp(op, "==") == 0 || strcmp(op, "!=") == 0) return 7;
+    if (strcmp(op, "<") == 0 || strcmp(op, ">") == 0 ||
+        strcmp(op, "<=") == 0 || strcmp(op, ">=") == 0) return 8;
+    if (strcmp(op, "<<") == 0 || strcmp(op, ">>") == 0) return 9;
+    if (strcmp(op, "+") == 0 || strcmp(op, "-") == 0) return 10;
+    if (strcmp(op, "*") == 0 || strcmp(op, "/") == 0 || strcmp(op, "%") == 0) return 11;
+    return 0;
+}
+
+static Expr *parse_expression_bp(ExprParser *p, int min_bp);
+
+static Expr *parse_primary(ExprParser *p) {
+    if (p->pos >= p->end) die_at(p->pos, "expected expression");
+
+    int i = p->pos;
+    Expr *e = NULL;
+
+    if (tokens[i].type == TOK_NUMBER) {
+        e = new_expr(EXPR_INT);
+        e->as.int_val = strtoll(tokens[i].text, NULL, 0);
+        ++p->pos;
+    } else if (tokens[i].type == TOK_STRING) {
+        e = new_expr(EXPR_STRING);
+        e->as.str_val = xstrdup(tokens[i].text);
+        ++p->pos;
+    } else if (tokens[i].type == TOK_IDENT) {
+        e = new_expr(EXPR_IDENT);
+        e->as.ident = xstrdup(tokens[i].text);
+        ++p->pos;
+    } else if (tok_is(i, "(")) {
+        ++p->pos;
+        e = parse_expression_bp(p, 1);
+        if (!tok_is(p->pos, ")")) {
+            free_expr(e);
+            die_at(p->pos, "expected ')' after expression");
+        }
+        ++p->pos;
+    } else {
+        die_at(i, "expected expression");
+    }
+
+    for (;;) {
+        if (p->pos >= p->end) break;
+
+        if (tok_is(p->pos, ".") || tok_is(p->pos, "->")) {
+            int arrow = tok_is(p->pos, "->") ? 1 : 0;
+            ++p->pos;
+            if (p->pos >= p->end || tokens[p->pos].type != TOK_IDENT) {
+                free_expr(e);
+                die_at(p->pos, "expected member name after '.' or '->'");
+            }
+            Expr *m = new_expr(EXPR_MEMBER);
+            m->as.member.base = e;
+            m->as.member.member = xstrdup(tokens[p->pos].text);
+            m->as.member.arrow = arrow;
+            e = m;
+            ++p->pos;
+            continue;
+        }
+
+        if (tok_is(p->pos, "(")) {
+            ++p->pos;
+            Expr **args = NULL;
+            int argc = 0;
+            if (!tok_is(p->pos, ")")) {
+                for (;;) {
+                    Expr *arg = parse_expression_bp(p, 1);
+                    args = (Expr **)xrealloc(args, sizeof(*args) * (size_t)(argc + 1));
+                    args[argc++] = arg;
+                    if (tok_is(p->pos, ",")) {
+                        ++p->pos;
+                        continue;
+                    }
+                    break;
+                }
+            }
+            if (!tok_is(p->pos, ")")) {
+                free_expr(e);
+                for (int k = 0; k < argc; ++k) free_expr(args[k]);
+                free(args);
+                die_at(p->pos, "expected ')' after call arguments");
+            }
+            ++p->pos;
+            Expr *call = new_expr(EXPR_CALL);
+            call->as.call.callee = e;
+            call->as.call.args = args;
+            call->as.call.arg_count = argc;
+            e = call;
+            continue;
+        }
+
+        break;
+    }
+
+    return e;
+}
+
+static Expr *parse_unary(ExprParser *p) {
+    if (p->pos < p->end) {
+        const char *op = tokens[p->pos].text;
+        if (strcmp(op, "&") == 0 || strcmp(op, "*") == 0 || strcmp(op, "+") == 0 ||
+            strcmp(op, "-") == 0 || strcmp(op, "!") == 0 || strcmp(op, "~") == 0) {
+            ++p->pos;
+            Expr *e = new_expr(EXPR_UNARY);
+            snprintf(e->as.unary.op, sizeof(e->as.unary.op), "%s", op);
+            e->as.unary.operand = parse_unary(p);
+            return e;
+        }
+    }
+    return parse_primary(p);
+}
+
+static Expr *parse_expression_bp(ExprParser *p, int min_bp) {
+    Expr *lhs = parse_unary(p);
+
+    while (p->pos < p->end && token_is_binary_operator(p->pos)) {
+        const char *op = tokens[p->pos].text;
+        int prec = binary_precedence(op);
+        if (prec < min_bp) break;
+        bool right_assoc = prec == 1;
+        ++p->pos;
+        Expr *rhs = parse_expression_bp(p, right_assoc ? prec : prec + 1);
+        Expr *b = new_expr(EXPR_BINARY);
+        snprintf(b->as.binary.op, sizeof(b->as.binary.op), "%s", op);
+        b->as.binary.lhs = lhs;
+        b->as.binary.rhs = rhs;
+        lhs = b;
+    }
+
+    return lhs;
+}
+
+static Expr *parse_expr_range(int start, int end) {
+    if (start >= end) die_at(start, "expected expression");
+    ExprParser p;
+    p.pos = start;
+    p.end = end;
+    Expr *e = parse_expression_bp(&p, 1);
+    if (p.pos != end) {
+        free_expr(e);
+        die_at(p.pos, "unexpected token after expression");
+    }
+    return e;
+}
+
+static int scan_until_statement_end(int i, int end) {
+    int paren = 0, bracket = 0;
+    while (i < end) {
+        if (tok_is(i, "(")) ++paren;
+        else if (tok_is(i, ")") && paren > 0) --paren;
+        else if (tok_is(i, "[")) ++bracket;
+        else if (tok_is(i, "]") && bracket > 0) --bracket;
+        if (paren == 0 && bracket == 0 && tok_is(i, ";")) break;
+        if (paren == 0 && bracket == 0 && tok_is(i, "}")) break;
+        ++i;
+    }
+    return i;
 }
 
 static Stmt *parse_block(int open, int close);
@@ -378,15 +654,16 @@ static Stmt *parse_statements(int start, int end) {
             if (!tok_is(i, "=")) die_at(i, "expected '=' after let name");
             ++i;
             int expr_start = i;
-            while (i < end && !tok_is(i, ";")) ++i;
-            int expr_end = i;
-            s->as.let_stmt.expr_start = expr_start;
-            s->as.let_stmt.expr_end = expr_end;
+            int expr_end = scan_until_statement_end(i, end);
+            if (expr_end == expr_start) die_at(i, "expected initializer expression");
             if ((expr_end == expr_start + 1 && tokens[expr_start].type == TOK_IDENT && strcmp(tokens[expr_start].text, "CPU") == 0) ||
                 (expr_end == expr_start + 3 && tokens[expr_start].type == TOK_IDENT && strcmp(tokens[expr_start].text, "CPU") == 0 &&
                  tok_is(expr_start + 1, "(") && tok_is(expr_start + 2, ")")))
                 s->as.let_stmt.is_cpu_ctor = true;
+            else
+                s->as.let_stmt.expr = parse_expr_range(expr_start, expr_end);
             append_stmt(&head, &tail, s);
+            i = expr_end;
             if (i < end && tok_is(i, ";")) ++i;
             continue;
         }
@@ -406,11 +683,13 @@ static Stmt *parse_statements(int start, int end) {
         if (tok_is(i, "return")) {
             Stmt *s = new_stmt(ST_RETURN);
             ++i;
-            s->as.raw_stmt.expr_start = i;
-            while (i < end && !tok_is(i, ";")) ++i;
-            s->as.raw_stmt.expr_end = i;
-            if (i < end && tok_is(i, ";")) ++i;
+            int expr_start = i;
+            int expr_end = scan_until_statement_end(i, end);
+            if (expr_end == expr_start) die_at(i, "expected return expression");
+            s->as.raw_stmt.expr = parse_expr_range(expr_start, expr_end);
             append_stmt(&head, &tail, s);
+            i = expr_end;
+            if (i < end && tok_is(i, ";")) ++i;
             continue;
         }
 
@@ -441,18 +720,20 @@ static Stmt *parse_statements(int start, int end) {
             }
 
             if (body_open >= end || !tok_is(body_open, "{")) die_at(body_open, "expected '{' after condition");
-            if (is_while) {
-                s->as.while_stmt.cond_start = cond_start;
-                s->as.while_stmt.cond_end = cond_end;
-            } else {
-                s->as.if_stmt.cond_start = cond_start;
-                s->as.if_stmt.cond_end = cond_end;
-            }
+            Expr *cond = parse_expr_range(cond_start, cond_end);
             i = body_open;
             int body_close = find_matching_brace(body_open, end);
-            if (body_close >= end) die_at(i, "unterminated control-flow block");
-            if (is_while) s->as.while_stmt.body = parse_block(body_open, body_close);
-            else s->as.if_stmt.then_body = parse_block(body_open, body_close);
+            if (body_close >= end) {
+                free_expr(cond);
+                die_at(i, "unterminated control-flow block");
+            }
+            if (is_while) {
+                s->as.while_stmt.cond = cond;
+                s->as.while_stmt.body = parse_block(body_open, body_close);
+            } else {
+                s->as.if_stmt.cond = cond;
+                s->as.if_stmt.then_body = parse_block(body_open, body_close);
+            }
             i = body_close + 1;
 
             if (!is_while && tok_is(i, "else")) {
@@ -478,23 +759,15 @@ static Stmt *parse_statements(int start, int end) {
             continue;
         }
 
-        /* Generic C-like expression/assignment/function-call statement. */
         {
             int begin = i;
-            int paren = 0;
-            while (i < end) {
-                if (tok_is(i, "(")) ++paren;
-                else if (tok_is(i, ")") && paren > 0) --paren;
-                if (paren == 0 && tok_is(i, ";")) break;
-                if (paren == 0 && tok_is(i, "}")) break;
-                ++i;
-            }
-            if (i == begin) die_at(i, "unexpected token in statement");
+            int expr_end = scan_until_statement_end(i, end);
+            if (expr_end == begin) die_at(i, "unexpected token in statement");
             Stmt *s = new_stmt(ST_EXPR);
-            s->as.raw_stmt.expr_start = begin;
-            s->as.raw_stmt.expr_end = i;
-            if (i < end && tok_is(i, ";")) ++i;
+            s->as.raw_stmt.expr = parse_expr_range(begin, expr_end);
             append_stmt(&head, &tail, s);
+            i = expr_end;
+            if (i < end && tok_is(i, ";")) ++i;
         }
     }
 
@@ -743,8 +1016,44 @@ static void clear_symbols(void) {
     symbol_count = 0;
 }
 
-static void emit_expr_tokens(FILE *out, int start, int end) {
-    for (int i = start; i < end; ++i) emit_token(out, i);
+static void emit_expr(FILE *out, const Expr *e) {
+    if (!e) return;
+    switch (e->kind) {
+        case EXPR_INT:
+            fprintf(out, "%lld", e->as.int_val);
+            break;
+        case EXPR_STRING:
+            fprintf(out, "%s", e->as.str_val);
+            break;
+        case EXPR_IDENT:
+            fprintf(out, "%s", e->as.ident);
+            break;
+        case EXPR_UNARY:
+            fprintf(out, "%s", e->as.unary.op);
+            emit_expr(out, e->as.unary.operand);
+            break;
+        case EXPR_BINARY:
+            fputc('(', out);
+            emit_expr(out, e->as.binary.lhs);
+            fprintf(out, " %s ", e->as.binary.op);
+            emit_expr(out, e->as.binary.rhs);
+            fputc(')', out);
+            break;
+        case EXPR_CALL:
+            emit_expr(out, e->as.call.callee);
+            fputc('(', out);
+            for (int i = 0; i < e->as.call.arg_count; ++i) {
+                if (i) fputs(", ", out);
+                emit_expr(out, e->as.call.args[i]);
+            }
+            fputc(')', out);
+            break;
+        case EXPR_MEMBER:
+            emit_expr(out, e->as.member.base);
+            fputs(e->as.member.arrow ? "->" : ".", out);
+            fprintf(out, "%s", e->as.member.member);
+            break;
+    }
 }
 
 static void emit_print(FILE *out, int string_token) {
@@ -807,7 +1116,7 @@ static void emit_stmt_list(FILE *out, const Stmt *stmt, int indent) {
                     fprintf(out, "CPU %s = {0};\n", s->as.let_stmt.name);
                 } else {
                     fprintf(out, "__auto_type %s = ", s->as.let_stmt.name);
-                    emit_expr_tokens(out, s->as.let_stmt.expr_start, s->as.let_stmt.expr_end);
+                    emit_expr(out, s->as.let_stmt.expr);
                     fprintf(out, ";\n");
                 }
                 break;
@@ -819,20 +1128,20 @@ static void emit_stmt_list(FILE *out, const Stmt *stmt, int indent) {
             case ST_RETURN:
                 emit_indent(out, indent);
                 fputs("return ", out);
-                emit_expr_tokens(out, s->as.raw_stmt.expr_start, s->as.raw_stmt.expr_end);
+                emit_expr(out, s->as.raw_stmt.expr);
                 fputs(";\n", out);
                 break;
 
             case ST_EXPR:
                 emit_indent(out, indent);
-                emit_expr_tokens(out, s->as.raw_stmt.expr_start, s->as.raw_stmt.expr_end);
+                emit_expr(out, s->as.raw_stmt.expr);
                 fputs(";\n", out);
                 break;
 
             case ST_IF:
                 emit_indent(out, indent);
                 fputs("if (", out);
-                emit_expr_tokens(out, s->as.if_stmt.cond_start, s->as.if_stmt.cond_end);
+                emit_expr(out, s->as.if_stmt.cond);
                 fputs(") {\n", out);
                 emit_stmt_list(out, s->as.if_stmt.then_body, indent + 1);
                 emit_indent(out, indent);
@@ -847,7 +1156,7 @@ static void emit_stmt_list(FILE *out, const Stmt *stmt, int indent) {
             case ST_WHILE:
                 emit_indent(out, indent);
                 fputs("while (", out);
-                emit_expr_tokens(out, s->as.while_stmt.cond_start, s->as.while_stmt.cond_end);
+                emit_expr(out, s->as.while_stmt.cond);
                 fputs(") {\n", out);
                 emit_stmt_list(out, s->as.while_stmt.body, indent + 1);
                 emit_indent(out, indent);
@@ -896,6 +1205,21 @@ static void emit_function_params(FILE *out, int start, int end) {
     fputs(")", out);
 }
 
+static void register_stmt_strings(const Stmt *stmt) {
+    for (const Stmt *s = stmt; s; s = s->next) {
+        if (s->kind == ST_LET) {
+            register_symbol(s->as.let_stmt.name, s->as.let_stmt.expr && s->as.let_stmt.expr->kind == EXPR_STRING);
+        } else if (s->kind == ST_IF) {
+            register_stmt_strings(s->as.if_stmt.then_body);
+            register_stmt_strings(s->as.if_stmt.else_body);
+        } else if (s->kind == ST_WHILE) {
+            register_stmt_strings(s->as.while_stmt.body);
+        } else if (s->kind == ST_BLOCK) {
+            register_stmt_strings(s->as.block_stmt.body);
+        }
+    }
+}
+
 static void emit_program(FILE *out, Program *p) {
     fputs("#include <stdio.h>\n#include <stdint.h>\n#include <stdlib.h>\n\n", out);
     fputs("typedef uint64_t u64;\ntypedef uint32_t u32;\ntypedef uint16_t u16;\ntypedef uint8_t u8;\n\n", out);
@@ -929,13 +1253,7 @@ static void emit_program(FILE *out, Program *p) {
         fputs(" {\n", out);
 
         /* Register string locals before printing statements with interpolation. */
-        for (const Stmt *s = fn->body; s; s = s->next) {
-            if (s->kind == ST_LET) {
-                int is_str = (s->as.let_stmt.expr_end == s->as.let_stmt.expr_start + 1 &&
-                              tokens[s->as.let_stmt.expr_start].type == TOK_STRING);
-                register_symbol(s->as.let_stmt.name, is_str);
-            }
-        }
+        register_stmt_strings(fn->body);
 
         emit_stmt_list(out, fn->body, 1);
         fputs("}\n\n", out);
@@ -964,7 +1282,7 @@ static void emit_includes_directly(FILE *out) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "C* Compiler v0.5\nUsage: %s <file.cppo>\n", argv[0]);
+        fprintf(stderr, "C* Compiler v0.6\nUsage: %s <file.cppo>\n", argv[0]);
         return 1;
     }
 
@@ -1011,6 +1329,6 @@ int main(int argc, char **argv) {
     free_program(&program);
     clear_symbols();
 
-    printf("[C* Compiler v0.5] compiled successfully, output.c generated\n");
+    printf("[C* Compiler v0.6] compiled successfully, output.c generated\n");
     return 0;
 }

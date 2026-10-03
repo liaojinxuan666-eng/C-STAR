@@ -1,33 +1,38 @@
-# C* v0.5 — Compiler Foundation
+# C* v0.6 — Expression AST
 
-C* continues to follow its core principles:
+本版本继续保持 C* v0.5 已通过的 Comptime 路径不变，重点把运行时代码的表达式从“原始 token 直接输出 C”升级为真正的表达式 AST。
 
-- 极致的性能
-- 优秀的兼容
-- 极致的简易
+## 新增
 
-v0.5 moves the compiler internals toward a real frontend/backend boundary without changing the existing C* surface syntax.
+- 基本字面量：整数、字符串、标识符
+- 一元运算：`& * + - ! ~`
+- 二元运算与优先级：`= += -= *= /= %= || && | ^ & == != < > <= >= << >> + - * / %`
+- 函数调用：`foo(a, b)`
+- 成员访问：`cpu.x0`、`cpu->x0`
+- `let`、`return`、`if`、`while`、普通表达式语句全部走 AST
+- 保留 `let cpu = CPU()` 的特殊构造行为
+- 保留 v0.5 Comptime 专化生成路径
 
-## Internal pipeline
+## 目标
 
-```text
-.cppo
-  ↓
-Lexer
-  ↓
-Parser
-  ↓
-Program / Statement AST
-  ↓
-Comptime specialization
-  ↓
-C backend
-  ↓
-Clang -O3
-  ↓
-Native code
-```
+继续保持 C* 的三个原则：
 
-Runtime function bodies now use a small AST for `let`, `return`, expression statements, `print`, `if`, `else`, `while`, and nested blocks.
+> 极致的性能，优秀的兼容，极致的简易
 
-The proven token-based Comptime specialization path is retained in v0.5 so the compiler can be refactored without changing the language's core behavior.
+编译链仍然是：
+
+`.cppo → C* → generated C → clang -O3 → native`
+
+## 回归测试
+
+原 v0.5 四个测试应继续通过：
+
+- `comptime_if.cppo`
+- `hello.cppo`
+- `ptr_test.cppo`
+- `sim_test.cppo`
+
+新增：
+
+- `expr_ast.cppo`
+- `expr_logic.cppo`
