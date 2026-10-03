@@ -49,7 +49,7 @@ void lex(const char* src) {
             } else { 
                 while (isdigit(src[i])) tokens[token_count].text[len++] = src[i++]; 
             } 
-            tokens[token_count].text[len] = '\0';
+            tokens[token_count].text[len] = '\0'; 
             token_count++; continue; 
         }
         
@@ -232,7 +232,7 @@ void parse_and_gen(FILE* out) {
             char* var_name = tokens[i+1].text;
             
             int is_str = 0;
-            if (i+3 < token_count && tokens[i+2].text[0] && tokens[i+3].type == TOK_STRING) is_str = 1;
+            if (i+3 < token_count && tokens[i+2].text[0] == '=' && tokens[i+3].type == TOK_STRING) is_str = 1;
             
             int found = 0;
             for (int s = 0; s < symbol_count; s++) {
