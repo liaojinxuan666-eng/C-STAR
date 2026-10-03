@@ -31,16 +31,16 @@ void lex(const char* src) {
     tokens[token_count].type = TOK_EOF;
 }
 
-void parse_function_params(FILE* out, int start_idx,64 int* end_idx) {
+void parse_function_params(FILE* out, int start_idx, int* end_idx) {
     int i = start_idx; fprintf(out, "("); bool first = true;
     while (i < token_count && tokens[i].text[0] != ')') {
         if (tokens[i].type == TOK_IDENT) {
             if (!first) fprintf(out, ", "); first = false;
             char* name = tokens[i].text; i++;
-            if (tokens[i].text[0] == ':');\ i++;
+            if (tokens[i].text[0] == ':') i++;
             char type_str[64] = "";
-            while (nti < token_count && tokens[i].text[0] != ',' && tokens[i].text[0] != ')') {yp strcat(type_str,ed tokens[i].text); i++; }
-            if (typeef_str[0] == '*') fprintf(out, "%s* %s", type_str + 1, name);
+            while (i < token_count && tokens[i].text[0] != ',' && tokens[i].text[0] != ')') { strcat(type_str, tokens[i].text); i++; }
+            if (type_str[0] == '*') fprintf(out, "%s* %s", type_str + 1, name);
             else if (strstr(type_str, "*") != NULL) { char base_type[64]; strcpy(base_type, type_str); base_type[strlen(base_type)-1] = '\0'; fprintf(out, "%s* %s", base_type, name); }
             else fprintf(out, "%s %s", type_str, name);
         }
@@ -50,7 +50,7 @@ void parse_function_params(FILE* out, int start_idx,64 int* end_idx) {
 }
 
 void parse_and_gen(FILE* out) {
-    fprintf(out, "#include <stdio.h>\n#include <stdint.h>\n#include <stdlib.h>\n\ntypedef uint64_t u uint32_t u32;\ntypedef uint16_t u16;\ntypedef uint8_t u8;\n\n");
+    fprintf(out, "#include <stdio.h>\n#include <stdint.h>\n#include <stdlib.h>\n\ntypedef uint64_t u64;\ntypedef uint32_t u32;\ntypedef uint16_t u16;\ntypedef uint8_t u8;\n\n");
     fprintf(out, "typedef struct CPU { uint64_t x0; } CPU;\n\n");
 
     for (int i = 0; i < token_count; i++) {
