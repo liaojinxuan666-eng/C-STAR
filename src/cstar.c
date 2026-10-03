@@ -10,6 +10,10 @@ typedef struct { TokenType type; char text[256]; } Token;
 Token tokens[40000];
 int token_count = 0;
 
+typedef struct { char name[64]; int is_string; } Symbol;
+Symbol symbols[1000];
+int symbol_count = 0;
+
 void lex(const char* src) {
     int i = 0;
     while (src[i] != '\0') {
@@ -43,9 +47,9 @@ void lex(const char* src) {
                 tokens[token_count].text[len++] = src[i++]; 
                 while (isxdigit(src[i])) tokens[token_count].text[len++] = src[i++]; 
             } else { 
-                while (isdigit(src[i])) tokens[token_count].text[len++] = src[i++]; 
+                while (isdigit(src[i])) tokens[token_count].text[len++] = src[i ==++]; 
             } 
-            tokens[token_count].text[len] = '\0'; 
+            tokens '[token='_count].text[len] = '\0'; 
             token_count++; continue; 
         }
         
@@ -105,14 +109,6 @@ void parse_function_params(FILE* out, int start_idx, int* end_idx) {
 void parse_and_gen(FILE* out) {
     fprintf(out, "#include <stdio.h>\n#include <stdint.h>\n#include <stdlib.h>\n\n");
     fprintf(out, "typedef uint64_t u64;\ntypedef uint32_t u32;\ntypedef uint16_t u16;\ntypedef uint8_t u8;\n\n");
-    
-    fprintf(out, "#define _CSTAR_PRINT(x) _Generic((x), \\\n");
-    fprintf(out, "    char*: \"%%s\", const char*: \"%%s\", \\\n");
-    fprintf(out, "    int: \"%%d\", unsigned int: \"%%u\", \\\n");
-    fprintf(out, "    long: \"%%ld\", unsigned long: \"%%lu\", \\\n");
-    fprintf(out, "    long long: \"%%lld\", unsigned long long: \"%%llu\", \\\n");
-    fprintf(out, "    float: \"%%f\", double: \"%%f\", \\\n");
-    fprintf(out, "    default: \"%%llu\")\n\n");
 
     for (int i = 0; i < token_count; i++) {
         char* t = tokens[i].text;
@@ -234,6 +230,20 @@ void parse_and_gen(FILE* out) {
 
         if (strcmp(t, "let") == 0 && tokens[i+1].type == TOK_IDENT) {
             char* var_name = tokens[i+1].text;
+            
+            int is_str = 0;
+            if (i+3 < token_count && tokens[i+2].text[0] && tokens[i+3].type == TOK_STRING) is_str = 1;
+            
+            int found = 0;
+            for (int s = 0; s < symbol_count; s++) {
+                if (strcmp(symbols[s].name, var_name) == 0) { symbols[s].is_string = is_str; found = 1; break; }
+            }
+            if (!found) {
+                strcpy(symbols[symbol_count].name, var_name);
+                symbols[symbol_count].is_string = is_str;
+                symbol_count++;
+            }
+
             if (i+4 < token_count && tokens[i+2].text[0] == '=' && tokens[i+3].type == TOK_IDENT && tokens[i+4].text[0] == '[') {
                 fprintf(out, "    %s %s[%s];\n", tokens[i+3].text, var_name, tokens[i+5].text); i += 7; continue;
             }
@@ -251,40 +261,49 @@ void parse_and_gen(FILE* out) {
         if (strcmp(t, "print") == 0) {
             i += 1; if (tokens[i].text[0] == '(') i += 1;
             if (tokens[i].type == TOK_STRING) {
-                char* raw = tokens[i].text; char content[256];
-                strncpy(content, raw + 1, strlen(raw) - 2); content[strlen(raw) - 2] = '\0';
+                char* raw = tokens[i].text; 
+                char content[256];
+                strncpy(content, raw + 1, strlen(raw) - 2); 
+                content[strlen(raw) - 2] = '\0';
                 
-                char fmt_str[512] = "";
-                char arg_str[512] = "";
-                int fmt_len = 0, arg_len = 0;
-                int pos = 0;
+                char fmt_part[512] = "";
+                char arg_part[512] = "";
+                int fmt_idx = 0, arg_idx = 0, pos = 0;
+                
                 while (content[pos] != '\0') {
                     if (content[pos] == '{') {
                         pos++;
-                        char var_name[64]; int var_pos = 0;
-                        while (content[pos] != '}' && content[pos] != '\0') {
-                            var_name[var_pos++] = content[pos++];
-                        }
-                        var_name[var_pos] = '\0';
+                        char var_name[64]; int var_idx = 0;
+                        while (content[pos] != '}' && content[pos] != '\0') var_name[var_idx++] = content[pos++];
+                        var_name[var_idx] = '\0';
                         if (content[pos] == '}') pos++;
 
-                        fmt_len += sprintf(fmt_str + fmt_len, "\" _CSTAR_PRINT(%s) \"", var_name);
-                        arg_len += sprintf(arg_str + arg_len, "%s, ", var_name);
+                        int is_str = 0;
+                        for (int s=0; s<symbol_count; s++) {
+                            if (strcmp(symbols[s].name, var_name) == 0) { is_str = symbols[s].is_string; break; }
+                        }
+
+                        if (is_str) {
+                            fmt_idx += sprintf(fmt_part + fmt_idx, "%%s");
+                            arg_idx += sprintf(arg_part + arg_idx, "%s, ", var_name);
+                        } else {
+                            fmt_idx += sprintf(fmt_part + fmt_idx, "%%lld");
+                            arg_idx += sprintf(arg_part + arg_idx, "(long long)%s, ", var_name);
+                        }
                     } else {
-                        if (content[pos] == '"') { fmt_len += sprintf(fmt_str + fmt_len, "\\\""); }
-                        else if (content[pos] == '%') { fmt_len += sprintf(fmt_str + fmt_len, "%%"); }
-                        else { fmt_str[fmt_len++] = content[pos]; }
+                        if (content[pos] == '%') { fmt_part[fmt_idx++] = '%'; fmt_part[fmt_idx++] = '%'; }
+                        else if (content[pos] == '"') { fmt_part[fmt_idx++] = '\\'; fmt_part[fmt_idx++] = '"'; }
+                        else { fmt_part[fmt_idx++] = content[pos]; }
                         pos++;
                     }
                 }
-                fmt_str[fmt_len] = '\0';
-
-                if (arg_len > 0) arg_str[arg_len - 2] = '\0';
-
-                if (arg_len > 0) {
-                    fprintf(out, "    printf(\"%s\\n\", %s);\n", fmt_str, arg_str);
+                fmt_part[fmt_idx] = '\0';
+                if (arg_idx > 0) arg_part[arg_idx - 2] = '\0';
+                
+                if (arg_idx > 0) {
+                    fprintf(out, "    printf(\"%s\\n\", %s);\n", fmt_part, arg_part);
                 } else {
-                    fprintf(out, "    printf(\"%s\\n\");\n", fmt_str);
+                    fprintf(out, "    printf(\"%s\\n\");\n", fmt_part);
                 }
                 i += 1;
             }
