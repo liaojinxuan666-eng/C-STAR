@@ -67,7 +67,7 @@ void lex(const char* src) {
     strcpy(tokens[token_count].text, "EOF");
 }
 
-// ================= 辅助代码生成 =================
+// ================= 辅助代码生成：参数翻转 =================
 void parse_function_params(FILE* out, int start_idx, int* end_idx) {
     int i = start_idx;
     fprintf(out, "(");
@@ -75,10 +75,33 @@ void parse_function_params(FILE* out, int start_idx, int* end_idx) {
     while (i < token_count && tokens[i].text[0] != ')') {
         if (!first) fprintf(out, ", ");
         first = false;
+
+        // 收集参数 token
+        char param_tokens[10][64];
+        int param_count = 0;
         while (i < token_count && tokens[i].text[0] != ',' && tokens[i].text[0] != ')') {
-            fprintf(out, "%s ", tokens[i].text);
+            strncpy(param_tokens[param_count], tokens[i].text, 63);
+            param_tokens[param_count][63] = '\0';
+            param_count++;
             i++;
         }
+        
+        // 核心修复：如果是 C* 风格的 "name: type"，翻转成 C 的 "type name"
+        if (param_count >= 3 && strcmp(param_tokens[1], ":") == 0) {
+            // 输出：类型 变量名
+            fprintf(out, "%s %s", param_tokens[2], param_tokens[0]);
+            // 处理多级指针
+            if (param_count > 3) {
+                for (int k = 3; k < param_count; k++) fprintf(out, "%s", param_tokens[k]);
+            }
+        } else {
+            // 兼容 C 风格直接写 "int a" 的情况
+            for (int k = 0; k < param_count; k++) {
+                fprintf(out, "%s", param_tokens[k]);
+                if (k < param_count - 1) fprintf(out, " ");
+            }
+        }
+
         if (tokens[i].text[0] == ',') i++;
     }
     fprintf(out, ")");
@@ -189,9 +212,30 @@ void parse_and_gen(FILE* out) {
             }
         }
 
+        // 函数定义解析（强化版）
         if (strcmp(t, "fn") == 0 && tokens[i+1].type == TOK_IDENT) {
-            char* func_name = tokens[i+1].text; i += 2;
-            fprintf(out, "int %s", func_name); 
+            char* func_name = tokens[i+1].text; 
+            i += 2;
+            
+            // 解析返回值
+            int ret_type_start = i;
+            while (i < token_count && tokens[i].text[0] != '(') i++; // 找到 '('
+            int ret_type_end = i; // i 现在指向 '('
+            
+            // 输出返回值类型（支持 void, int, 或其他类型）
+            if (ret_type_start < ret_type_end) {
+                if (strcmp(tokens[ret_type_start].text, "->") == 0) {
+                    for (int k = ret_type_start + 1; k < ret_type_end; k++) {
+                        fprintf(out, "%s ", tokens[k].text);
+                    }
+                } else {
+                    fprintf(out, "int "); // 默认返回 int
+                }
+            } else {
+                fprintf(out, "int "); // 无返回类型默认 int
+            }
+            
+            fprintf(out, "%s", func_name); 
             parse_function_params(out, i + 1, &i);
             while (tokens[i].text[0] != '{' && i < token_count) i++;
             fprintf(out, " {\n"); 
