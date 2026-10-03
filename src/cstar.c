@@ -10,7 +10,10 @@ typedef struct { TokenType type; char text[256]; } Token;
 Token tokens[40000];
 int token_count = 0;
 
-// ================= 编译期表达式求值器 =================
+typedef struct { char name[64]; int is_string; } Symbol;
+Symbol symbols[1000];
+int symbol_count = 0;
+
 int find_matching_brace(int start, int limit) {
     int depth = 0;
     for (int i = start; i < limit; i++) {
@@ -47,7 +50,6 @@ int eval_expr(int start, int end, char* loop_var, int loop_val) {
 
     int op_idx = -1;
     char op[4] = "";
-    // 低优先级：==, !=, <, >
     for (int i = end - 1; i >= start; i--) {
         if (tokens[i].type == TOK_SYMBOL) {
             if (strcmp(tokens[i].text, "==") == 0 || strcmp(tokens[i].text, "!=") == 0 ||
@@ -67,7 +69,6 @@ int eval_expr(int start, int end, char* loop_var, int loop_val) {
         if (strcmp(op, ">") == 0) return left > right;
     }
 
-    // 高优先级：%, +, -
     for (int i = end - 1; i >= start; i--) {
         if (tokens[i].type == TOK_SYMBOL) {
             if (strcmp(tokens[i].text, "%") == 0 || strcmp(tokens[i].text, "+") == 0 || strcmp(tokens[i].text, "-") == 0) {
@@ -88,7 +89,6 @@ int eval_expr(int start, int end, char* loop_var, int loop_val) {
     return 0;
 }
 
-// ================= comptime 块展开器 =================
 void unroll_comptime_block(FILE* out, int start, int end, char* loop_var, int op) {
     for (int k = start; k < end; k++) {
         if (strcmp(tokens[k].text, "if") == 0) {
@@ -138,7 +138,6 @@ void unroll_comptime_block(FILE* out, int start, int end, char* loop_var, int op
     }
 }
 
-// ================= 词法分析 =================
 void lex(const char* src) {
     int i = 0;
     while (src[i] != '\0') {
@@ -231,7 +230,6 @@ void parse_function_params(FILE* out, int start_idx, int* end_idx) {
     *end_idx = i;
 }
 
-// ================= 语法分析与 C 代码生成 =================
 void parse_and_gen(FILE* out) {
     fprintf(out, "#include <stdio.h>\n#include <stdint.h>\n#include <stdlib.h>\n\n");
     fprintf(out, "typedef uint64_t u64;\ntypedef uint32_t u32;\ntypedef uint16_t u16;\ntypedef uint8_t u8;\n\n");
@@ -332,6 +330,19 @@ void parse_and_gen(FILE* out) {
         if (strcmp(t, "let") == 0 && tokens[i+1].type == TOK_IDENT) {
             char* var_name = tokens[i+1].text;
             
+            int is_str = 0;
+            if (i+3 < token_count && tokens[i+2].text[0] == '=' && tokens[i+3].type == TOK_STRING) is_str = 1;
+            
+            int found = 0;
+            for (int s = 0; s < symbol_count; s++) {
+                if (strcmp(symbols[s].name, var_name) == 0) { symbols[s].is_string = is_str; found = 1; break; }
+            }
+            if (!found) {
+                strcpy(symbols[symbol_count].name, var_name);
+                symbols[symbol_count].is_string = is_str;
+                symbol_count++;
+            }
+
             if (i+4 < token_count && tokens[i+2].text[0] == '=' && tokens[i+3].type == TOK_IDENT && tokens[i+4].text[0] == '[') {
                 fprintf(out, "    %s %s[%s];\n", tokens[i+3].text, var_name, tokens[i+5].text); i += 7; continue;
             }
@@ -365,12 +376,12 @@ void parse_and_gen(FILE* out) {
                         while (content[pos] != '}' && content[pos] != '\0') var_name[var_idx++] = content[pos++];
                         var_name[var_idx] = '\0';
                         if (content[pos] == '}') pos++;
-                        
+
                         int is_str = 0;
-                        for (int s=0; s<1000; s++) { // simple symbol lookup replaced, just check if it starts with 's' or not, we keep it simple.
+                        for (int s = 0; s < symbol_count; s++) {
                             if (strcmp(symbols[s].name, var_name) == 0) { is_str = symbols[s].is_string; break; }
                         }
-                        
+
                         if (is_str) {
                             fmt_idx += sprintf(fmt_part + fmt_idx, "%%s");
                             arg_idx += sprintf(arg_part + arg_idx, "%s, ", var_name);
