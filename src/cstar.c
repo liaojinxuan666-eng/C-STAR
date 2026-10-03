@@ -253,38 +253,38 @@ void parse_and_gen(FILE* out) {
             if (tokens[i].type == TOK_STRING) {
                 char* raw = tokens[i].text; char content[256];
                 strncpy(content, raw + 1, strlen(raw) - 2); content[strlen(raw) - 2] = '\0';
-                char format[256] = ""; char args[512] = ""; int pos = 0, fmt_pos = 0, arg_pos = 0; bool in_var = false; char var_name[64] = ""; int var_pos = 0;
+                
+                char fmt_str[512] = "";
+                char arg_str[512] = "";
+                int fmt_len = 0, arg_len = 0;
+                int pos = 0;
                 while (content[pos] != '\0') {
-                    if (content[pos] == '{') { in_var = true; pos++; continue; }
-                    if (content[pos] == '}') {
-                        in_var = false; 
-                        if (arg_pos > 0) strcat(args, ", "); 
-                        strcat(args, var_name); 
-                        arg_pos = 1; 
-                        var_name[0] = '\0';
-                        strcat(format, "%s"); pos++; continue;
-                    }
-                    if (in_var) { var_name[var_pos++] = content[pos++]; var_name[var_pos] = '\0'; } 
-                    else { 
-                        if (content[pos] == '%') { format[fmt_pos++] = '%'; format[fmt_pos++] = '%'; } 
-                        else format[fmt_pos++] = content[pos]; 
-                        pos++; 
+                    if (content[pos] == '{') {
+                        pos++;
+                        char var_name[64]; int var_pos = 0;
+                        while (content[pos] != '}' && content[pos] != '\0') {
+                            var_name[var_pos++] = content[pos++];
+                        }
+                        var_name[var_pos] = '\0';
+                        if (content[pos] == '}') pos++;
+
+                        fmt_len += sprintf(fmt_str + fmt_len, "\" _CSTAR_PRINT(%s) \"", var_name);
+                        arg_len += sprintf(arg_str + arg_len, "%s, ", var_name);
+                    } else {
+                        if (content[pos] == '"') { fmt_len += sprintf(fmt_str + fmt_len, "\\\""); }
+                        else if (content[pos] == '%') { fmt_len += sprintf(fmt_str + fmt_len, "%%"); }
+                        else { fmt_str[fmt_len++] = content[pos]; }
+                        pos++;
                     }
                 }
-                format[fmt_pos] = '\0';
-                if (arg_pos > 0) {
-                    fprintf(out, "    printf(\"%s\\n\", ", format);
-                    char* token = strtok(args, ", ");
-                    bool first_arg = true;
-                    while (token != NULL) {
-                        if (!first_arg) fprintf(out, ", ");
-                        fprintf(out, "_CSTAR_PRINT(%s), %s", token, token);
-                        first_arg = false;
-                        token = strtok(NULL, ", ");
-                    }
-                    fprintf(out, ");\n");
+                fmt_str[fmt_len] = '\0';
+
+                if (arg_len > 0) arg_str[arg_len - 2] = '\0';
+
+                if (arg_len > 0) {
+                    fprintf(out, "    printf(\"%s\\n\", %s);\n", fmt_str, arg_str);
                 } else {
-                    fprintf(out, "    printf(\"%s\\n\");\n", format);
+                    fprintf(out, "    printf(\"%s\\n\");\n", fmt_str);
                 }
                 i += 1;
             }
