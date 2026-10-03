@@ -80,6 +80,7 @@ void parse_and_gen(FILE* out) {
 
                 for (int op = start_val; op < end_val; op++) {
                     char num_str[16]; sprintf(num_str, "%d", op);
+                    fprintf(out, "int op_%s(CPU *cpu);\n", num_str);
                     for (int k = template_start; k < template_end; k++) {
                         if (tokens[k].text[0] == '{' && tokens[k+1].type == TOK_IDENT && strcmp(tokens[k+1].text, loop_var) == 0 && tokens[k+2].text[0] == '}') {
                             fprintf(out, "%s", num_str);
