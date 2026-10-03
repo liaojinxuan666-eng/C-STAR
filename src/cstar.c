@@ -13,9 +13,9 @@
  * C* v0.7
  *
  * The frontend now parses ordinary runtime expressions into an AST.
- * Comptime templates intentionally remain token-oriented for now so the
- * proven specialization path stays stable while expression handling gains
- * real precedence, calls, member access, unary operators, and assignment.
+ * Comptime conditions are parsed through the same expression AST used by
+ * runtime code. The evaluator accepts deterministic integer expressions and
+ * feeds their values into compile-time specialization.
  */
 
 typedef enum {
@@ -77,6 +77,8 @@ struct Expr {
     } as;
 };
 
+typedef struct CType CType;
+
 typedef enum {
     ST_BLOCK,
     ST_LET,
@@ -101,6 +103,7 @@ struct Stmt {
             int type_start;
             int type_end;
             int has_explicit_type;
+            CType *inferred_type;
         } let_stmt;
         struct {
             Expr *expr;
@@ -166,7 +169,6 @@ typedef enum {
     TYPE_STRING
 } TypeKind;
 
-typedef struct CType CType;
 struct CType {
     TypeKind kind;
     int bits;
@@ -262,53 +264,83 @@ static int find_matching_paren(int open, int limit) {
     return limit;
 }
 
-static int eval_expr(int start, int end, const char *loop_var, int loop_val) {
-    if (start >= end) return 0;
+static long long eval_comptime_ast(const Expr *e, const char *loop_var, long long loop_val) {
+    if (!e) die_at(-1, "invalid comptime expression");
 
-    if (tok_is(start, "(") && find_matching_paren(start, end) == end - 1)
-        return eval_expr(start + 1, end - 1, loop_var, loop_val);
+    switch (e->kind) {
+        case EXPR_INT:
+            return e->as.int_val;
 
-    if (end == start + 1) {
-        if (tokens[start].type == TOK_NUMBER) return (int)strtol(tokens[start].text, NULL, 0);
-        if (tokens[start].type == TOK_IDENT && strcmp(tokens[start].text, loop_var) == 0) return loop_val;
-        return 0;
-    }
+        case EXPR_IDENT:
+            if (loop_var && strcmp(e->as.ident, loop_var) == 0) return loop_val;
+            die_at(-1, "unknown identifier in comptime expression");
+            return 0;
 
-    const char *cmp_ops[] = {"==", "!=", "<", ">", "<=", ">="};
-    for (int opn = 0; opn < 6; ++opn) {
-        for (int i = end - 1; i >= start; --i) {
-            if (strcmp(tokens[i].text, cmp_ops[opn]) == 0) {
-                int a = eval_expr(start, i, loop_var, loop_val);
-                int b = eval_expr(i + 1, end, loop_var, loop_val);
-                switch (opn) {
-                    case 0: return a == b;
-                    case 1: return a != b;
-                    case 2: return a < b;
-                    case 3: return a > b;
-                    case 4: return a <= b;
-                    default: return a >= b;
-                }
-            }
+        case EXPR_UNARY: {
+            long long v = eval_comptime_ast(e->as.unary.operand, loop_var, loop_val);
+            const char *op = e->as.unary.op;
+            if (strcmp(op, "+") == 0) return v;
+            if (strcmp(op, "-") == 0) return -v;
+            if (strcmp(op, "!") == 0) return !v;
+            if (strcmp(op, "~") == 0) return ~v;
+            die_at(-1, "unsupported unary operator in comptime expression");
+            return 0;
         }
-    }
 
-    const char *arith_ops[] = {"+", "-", "%", "*", "/"};
-    for (int opn = 0; opn < 5; ++opn) {
-        for (int i = end - 1; i >= start; --i) {
-            if (strcmp(tokens[i].text, arith_ops[opn]) == 0) {
-                int a = eval_expr(start, i, loop_var, loop_val);
-                int b = eval_expr(i + 1, end, loop_var, loop_val);
-                switch (opn) {
-                    case 0: return a + b;
-                    case 1: return a - b;
-                    case 2: return b ? a % b : 0;
-                    case 3: return a * b;
-                    default: return b ? a / b : 0;
-                }
+        case EXPR_BINARY: {
+            const char *op = e->as.binary.op;
+            long long a = eval_comptime_ast(e->as.binary.lhs, loop_var, loop_val);
+            long long b = eval_comptime_ast(e->as.binary.rhs, loop_var, loop_val);
+
+            if (strcmp(op, "=") == 0) return b;
+            if (strcmp(op, "+=") == 0) return a + b;
+            if (strcmp(op, "-=") == 0) return a - b;
+            if (strcmp(op, "*=") == 0) return a * b;
+            if (strcmp(op, "/=") == 0) {
+                if (b == 0) die_at(-1, "division by zero in comptime expression");
+                return a / b;
             }
+            if (strcmp(op, "%=") == 0) {
+                if (b == 0) die_at(-1, "modulo by zero in comptime expression");
+                return a % b;
+            }
+            if (strcmp(op, "+") == 0) return a + b;
+            if (strcmp(op, "-") == 0) return a - b;
+            if (strcmp(op, "*") == 0) return a * b;
+            if (strcmp(op, "/") == 0) {
+                if (b == 0) die_at(-1, "division by zero in comptime expression");
+                return a / b;
+            }
+            if (strcmp(op, "%") == 0) {
+                if (b == 0) die_at(-1, "modulo by zero in comptime expression");
+                return a % b;
+            }
+            if (strcmp(op, "<<") == 0) return a << b;
+            if (strcmp(op, ">>") == 0) return a >> b;
+            if (strcmp(op, "&") == 0) return a & b;
+            if (strcmp(op, "|") == 0) return a | b;
+            if (strcmp(op, "^") == 0) return a ^ b;
+            if (strcmp(op, "==") == 0) return a == b;
+            if (strcmp(op, "!=") == 0) return a != b;
+            if (strcmp(op, "<") == 0) return a < b;
+            if (strcmp(op, ">") == 0) return a > b;
+            if (strcmp(op, "<=") == 0) return a <= b;
+            if (strcmp(op, ">=") == 0) return a >= b;
+            if (strcmp(op, "&&") == 0) return (a != 0) && (b != 0);
+            if (strcmp(op, "||") == 0) return (a != 0) || (b != 0);
+
+            die_at(-1, "unsupported binary operator in comptime expression");
+            return 0;
         }
+
+        case EXPR_STRING:
+        case EXPR_CALL:
+        case EXPR_MEMBER:
+            die_at(-1, "expression is not a comptime integer expression");
+            return 0;
     }
 
+    die_at(-1, "invalid comptime expression kind");
     return 0;
 }
 
@@ -404,6 +436,8 @@ static Expr *new_expr(ExprKind kind) {
     return e;
 }
 
+static void free_type(CType *t);
+
 static void free_expr(Expr *expr) {
     if (!expr) return;
     switch (expr->kind) {
@@ -443,6 +477,10 @@ static void free_stmt_list(Stmt *stmt) {
                 free(stmt->as.let_stmt.name);
                 free(stmt->as.let_stmt.ctor_type);
                 free_expr(stmt->as.let_stmt.expr);
+                if (stmt->as.let_stmt.inferred_type) {
+                    free_type(stmt->as.let_stmt.inferred_type);
+                    free(stmt->as.let_stmt.inferred_type);
+                }
                 break;
             case ST_RETURN:
             case ST_EXPR:
@@ -684,6 +722,7 @@ static Stmt *parse_statements(int start, int end) {
             s->as.let_stmt.ctor_type = NULL;
             s->as.let_stmt.type_start = s->as.let_stmt.type_end = -1;
             s->as.let_stmt.has_explicit_type = false;
+            s->as.let_stmt.inferred_type = NULL;
             i += 2;
             if (tok_is(i, ":")) {
                 ++i;
@@ -964,7 +1003,8 @@ static void emit_range(FILE *out, int start, int end, int loop_val) {
             continue;
         }
         if (tokens[i].type == TOK_IDENT && i + 3 < end && tok_is(i + 1, "{") &&
-            (tokens[i + 2].type == TOK_IDENT || tokens[i + 2].type == TOK_NUMBER) && tok_is(i + 3, "}")) {
+            (tokens[i + 2].type == TOK_IDENT || tokens[i + 2].type == TOK_NUMBER) && tok_is(i + 3, "}") &&
+            tokens[i].text[0] != '\0' && tokens[i].text[strlen(tokens[i].text) - 1] == '_') {
             fprintf(out, "%s%d", tokens[i].text, loop_val);
             i += 3;
             continue;
@@ -982,7 +1022,8 @@ static int emit_comptime_if(FILE *out, int if_idx, int body_end, const char *loo
     if (tok_is(cond_start, "(")) {
         int cond_close = find_matching_paren(cond_start, body_end);
         if (cond_close >= body_end) return if_idx;
-        cond_end = cond_close;
+        /* Keep the outer parentheses in the AST range. */
+        cond_end = cond_close + 1;
         then_open = cond_close + 1;
     } else {
         while (cond_end < body_end && !tok_is(cond_end, "{")) ++cond_end;
@@ -1004,13 +1045,15 @@ static int emit_comptime_if(FILE *out, int if_idx, int body_end, const char *loo
         }
     }
 
-    int result = eval_expr(cond_start, cond_end, loop_var, loop_val);
+    Expr *cond_ast = parse_expr_range(cond_start, cond_end);
+    long long result = eval_comptime_ast(cond_ast, loop_var, loop_val);
+    free_expr(cond_ast);
     int start = result ? then_open + 1 : (else_open >= 0 ? else_open + 1 : -1);
     int end = result ? then_close : else_close;
 
     if (start >= 0 && end > start) {
         if (tok_is(start, "int") && start + 1 < end && strncmp(tokens[start + 1].text, "op_", 3) == 0)
-            fprintf(out, "static inline ");
+            fprintf(out, "static inline CSTAR_UNUSED ");
         emit_range(out, start, end, loop_val);
         fprintf(out, "\n");
     }
@@ -1027,7 +1070,7 @@ static void emit_comptime(FILE *out, const ComptimeDecl *d) {
                 k = last;
                 handled_if = 1;
             } else if (tok_is(k, "int") && k + 1 < d->body_end && strncmp(tokens[k + 1].text, "op_", 3) == 0) {
-                fprintf(out, "static inline ");
+                fprintf(out, "static inline CSTAR_UNUSED ");
                 emit_range(out, k, d->body_end, value);
                 fprintf(out, "\n");
                 handled_if = 1;
@@ -1149,6 +1192,33 @@ static void emit_print(FILE *out, int string_token) {
 
 static void emit_c_type_tokens(FILE *out, int start, int end);
 
+static void emit_c_type_value(FILE *out, const CType *t) {
+    if (!t) { fputs("int", out); return; }
+    switch (t->kind) {
+        case TYPE_VOID: fputs("void", out); break;
+        case TYPE_BOOL: fputs("bool", out); break;
+        case TYPE_INT:
+            if (t->name[0]) fputs(t->name, out);
+            else if (t->bits == 64) fputs("i64", out);
+            else fputs("int", out);
+            break;
+        case TYPE_UINT:
+            if (t->name[0]) fputs(t->name, out);
+            else if (t->bits == 8) fputs("u8", out);
+            else if (t->bits == 16) fputs("u16", out);
+            else if (t->bits == 32) fputs("u32", out);
+            else fputs("u64", out);
+            break;
+        case TYPE_STRING: fputs("const char *", out); break;
+        case TYPE_STRUCT: fputs(t->name, out); break;
+        case TYPE_PTR:
+            emit_c_type_value(out, t->base);
+            fputs(" *", out);
+            break;
+        default: fputs("int", out); break;
+    }
+}
+
 static void emit_stmt_list(FILE *out, const Stmt *stmt, int indent);
 
 static void emit_indent(FILE *out, int indent) {
@@ -1156,7 +1226,7 @@ static void emit_indent(FILE *out, int indent) {
 }
 
 static void emit_stmt_list(FILE *out, const Stmt *stmt, int indent) {
-    for (const Stmt *s = stmt; s; s = s->next) {
+    for (Stmt *s = (Stmt *)stmt; s; s = s->next) {
         switch (s->kind) {
             case ST_LET:
                 emit_indent(out, indent);
@@ -1168,7 +1238,8 @@ static void emit_stmt_list(FILE *out, const Stmt *stmt, int indent) {
                     emit_expr(out, s->as.let_stmt.expr);
                     fputs(";\n", out);
                 } else {
-                    fprintf(out, "__auto_type %s = ", s->as.let_stmt.name);
+                    emit_c_type_value(out, s->as.let_stmt.inferred_type);
+                    fprintf(out, " %s = ", s->as.let_stmt.name);
                     emit_expr(out, s->as.let_stmt.expr);
                     fprintf(out, ";\n");
                 }
@@ -1194,7 +1265,14 @@ static void emit_stmt_list(FILE *out, const Stmt *stmt, int indent) {
             case ST_IF:
                 emit_indent(out, indent);
                 fputs("if (", out);
-                emit_expr(out, s->as.if_stmt.cond);
+                if (s->as.if_stmt.cond->kind == EXPR_BINARY) {
+                    const Expr *c = s->as.if_stmt.cond;
+                    emit_expr(out, c->as.binary.lhs);
+                    fprintf(out, " %s ", c->as.binary.op);
+                    emit_expr(out, c->as.binary.rhs);
+                } else {
+                    emit_expr(out, s->as.if_stmt.cond);
+                }
                 fputs(") {\n", out);
                 emit_stmt_list(out, s->as.if_stmt.then_body, indent + 1);
                 emit_indent(out, indent);
@@ -1209,7 +1287,14 @@ static void emit_stmt_list(FILE *out, const Stmt *stmt, int indent) {
             case ST_WHILE:
                 emit_indent(out, indent);
                 fputs("while (", out);
-                emit_expr(out, s->as.while_stmt.cond);
+                if (s->as.while_stmt.cond->kind == EXPR_BINARY) {
+                    const Expr *c = s->as.while_stmt.cond;
+                    emit_expr(out, c->as.binary.lhs);
+                    fprintf(out, " %s ", c->as.binary.op);
+                    emit_expr(out, c->as.binary.rhs);
+                } else {
+                    emit_expr(out, s->as.while_stmt.cond);
+                }
                 fputs(") {\n", out);
                 emit_stmt_list(out, s->as.while_stmt.body, indent + 1);
                 emit_indent(out, indent);
@@ -1423,7 +1508,50 @@ static CType function_return_type(const Program *p, const char *name) {
     return type_unknown();
 }
 
+typedef struct {
+    int params_start;
+    int params_end;
+    int return_start;
+    int return_end;
+} GeneratedFunctionInfo;
+
+static bool find_comptime_generated_function(const Program *p, const char *name, GeneratedFunctionInfo *out) {
+    if (!p || !name) return false;
+
+    for (size_t ci = 0; ci < p->comptime_count; ++ci) {
+        const ComptimeDecl *d = &p->comptimes[ci];
+        for (int k = d->body_start + 1; k + 4 < d->body_end; ++k) {
+            if (tokens[k].type != TOK_IDENT) continue;
+            if (!tok_is(k + 1, "{") || !tok_is(k + 2, d->loop_var) ||
+                !tok_is(k + 3, "}") || !tok_is(k + 4, "(")) continue;
+
+            char generated[256];
+            for (int value = d->start_value; value < d->end_value; ++value) {
+                snprintf(generated, sizeof(generated), "%s%d", tokens[k].text, value);
+                if (strcmp(generated, name) != 0) continue;
+
+                int close = find_matching_paren(k + 4, d->body_end);
+                if (close >= d->body_end) return false;
+
+                int ret_start = k - 1;
+                while (ret_start > d->body_start && !tok_is(ret_start - 1, ";") &&
+                       !tok_is(ret_start - 1, "{") && !tok_is(ret_start - 1, "}")) --ret_start;
+
+                if (out) {
+                    out->params_start = k + 5;
+                    out->params_end = close;
+                    out->return_start = ret_start;
+                    out->return_end = k;
+                }
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 static int function_param_count(const FunctionDecl *fn) {
+    if (fn->params_end == fn->params_start + 1 && tok_is(fn->params_start, "void")) return 0;
     int i = fn->params_start, count = 0;
     while (i < fn->params_end) {
         while (i < fn->params_end && tok_is(i, ",")) ++i;
@@ -1442,6 +1570,7 @@ static int function_param_count(const FunctionDecl *fn) {
 }
 
 static bool function_param_at(const FunctionDecl *fn, const Program *p, int wanted, char *name_out, size_t name_cap, CType *type_out) {
+    if (fn->params_end == fn->params_start + 1 && tok_is(fn->params_start, "void")) return false;
     int i = fn->params_start, index = 0;
     while (i < fn->params_end) {
         while (i < fn->params_end && tok_is(i, ",")) ++i;
@@ -1505,6 +1634,31 @@ static CType check_expr(const Program *p, TypeEnv *env, const Expr *e) {
                 const char *name = e->as.call.callee->as.ident;
                 const FunctionDecl *fn = NULL;
                 for (size_t i = 0; i < p->function_count; ++i) if (strcmp(p->functions[i].name, name) == 0) { fn = &p->functions[i]; break; }
+                if (!fn) {
+                    GeneratedFunctionInfo gi;
+                    if (find_comptime_generated_function(p, name, &gi)) {
+                        FunctionDecl generated;
+                        memset(&generated, 0, sizeof(generated));
+                        generated.params_start = gi.params_start;
+                        generated.params_end = gi.params_end;
+
+                        int expected = function_param_count(&generated);
+                        if (expected != e->as.call.arg_count) die_at(-1, "comptime-generated function argument count mismatch");
+                        for (int i = 0; i < e->as.call.arg_count; ++i) {
+                            char pn[128];
+                            CType pt = type_unknown();
+                            if (function_param_at(&generated, p, i, pn, sizeof(pn), &pt)) {
+                                CType at = check_expr(p, env, e->as.call.args[i]);
+                                if (!types_compatible(&pt, &at)) die_at(-1, "comptime-generated function argument type mismatch");
+                                free_type(&pt);
+                                free_type(&at);
+                            }
+                        }
+                        CType ret = parse_type_range(gi.return_start, gi.return_end, p);
+                        if (ret.kind == TYPE_UNKNOWN) ret = type_simple(TYPE_INT, 32, 1, "int");
+                        return ret;
+                    }
+                }
                 if (fn) {
                     int expected = function_param_count(fn);
                     if (expected != e->as.call.arg_count) die_at(-1, "function argument count mismatch");
@@ -1549,7 +1703,7 @@ static CType check_expr(const Program *p, TypeEnv *env, const Expr *e) {
 static void check_stmt_list(const Program *p, TypeEnv *env, const Stmt *stmt, CType expected_return);
 
 static void check_stmt_list(const Program *p, TypeEnv *env, const Stmt *stmt, CType expected_return) {
-    for (const Stmt *s = stmt; s; s = s->next) {
+    for (Stmt *s = (Stmt *)stmt; s; s = s->next) {
         switch (s->kind) {
             case ST_LET: {
                 CType t = type_unknown();
@@ -1573,6 +1727,12 @@ static void check_stmt_list(const Program *p, TypeEnv *env, const Stmt *stmt, CT
                     }
                 }
                 if (t.kind == TYPE_UNKNOWN && !s->as.let_stmt.has_explicit_type) die_at(-1, "cannot infer type of let initializer");
+                if (s->as.let_stmt.inferred_type) {
+                    free_type(s->as.let_stmt.inferred_type);
+                    free(s->as.let_stmt.inferred_type);
+                }
+                s->as.let_stmt.inferred_type = (CType *)xmalloc(sizeof(CType));
+                *s->as.let_stmt.inferred_type = clone_type(t);
                 env_push(env, s->as.let_stmt.name, t); free_type(&t); break;
             }
             case ST_RETURN: {
@@ -1624,6 +1784,7 @@ static void emit_c_type_tokens(FILE *out, int start, int end) {
 
 static void emit_program(FILE *out, Program *p) {
     fputs("#include <stdio.h>\n#include <stdint.h>\n#include <stdlib.h>\n#include <stdbool.h>\n\n", out);
+    fputs("#if defined(__GNUC__) || defined(__clang__)\n#define CSTAR_UNUSED __attribute__((unused))\n#else\n#define CSTAR_UNUSED\n#endif\n\n", out);
     fputs("typedef uint64_t u64;\ntypedef uint32_t u32;\ntypedef uint16_t u16;\ntypedef uint8_t u8;\n", out);
     fputs("typedef int64_t i64; typedef int32_t i32; typedef int16_t i16; typedef int8_t i8;\n", out);
     fputs("\n", out);
@@ -1653,7 +1814,8 @@ static void emit_program(FILE *out, Program *p) {
             fputs("int ", out);
         }
         fprintf(out, "%s", fn->name);
-        emit_function_params(out, fn->params_start, fn->params_end);
+        if (fn->params_start >= fn->params_end) fputs("(void)", out);
+        else emit_function_params(out, fn->params_start, fn->params_end);
         fputs(" {\n", out);
 
         /* Register string locals before printing statements with interpolation. */
@@ -1686,7 +1848,7 @@ static void emit_includes_directly(FILE *out) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "C* Compiler v0.6\nUsage: %s <file.cppo>\n", argv[0]);
+        fprintf(stderr, "C* Compiler v0.8\nUsage: %s <file.cppo>\n", argv[0]);
         return 1;
     }
 
@@ -1734,6 +1896,6 @@ int main(int argc, char **argv) {
     free_program(&program);
     clear_symbols();
 
-    printf("[C* Compiler v0.7] compiled successfully, output.c generated\n");
+    printf("[C* Compiler v0.8] compiled successfully, output.c generated\n");
     return 0;
 }
