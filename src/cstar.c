@@ -87,10 +87,9 @@ void parse_function_params(FILE* out, int start_idx, int* end_idx) {
 
 // ================= 语法分析与 C 代码生成 =================
 void parse_and_gen(FILE* out) {
-    // 1. 极致简易：内置 C 兼容头文件，和极简的 print 泛型宏
     fprintf(out, "#include <stdio.h>\n#include <stdint.h>\n#include <stdlib.h>\n\n");
     fprintf(out, "typedef uint64_t u64;\ntypedef uint32_t u32;\ntypedef uint16_t u16;\ntypedef uint8_t u8;\n\n");
-    // 核心魔法：利用 _Generic 实现零开销的类型推导打印
+    
     fprintf(out, "#define _CSTAR_PRINT(x) _Generic((x), \\\n");
     fprintf(out, "    char*: \"%%s\", const char*: \"%%s\", \\\n");
     fprintf(out, "    int: \"%%d\", unsigned int: \"%%u\", \\\n");
@@ -102,7 +101,6 @@ void parse_and_gen(FILE* out) {
     for (int i = 0; i < token_count; i++) {
         char* t = tokens[i].text;
 
-        // 1. 处理 include（极致兼容）
         if (strcmp(t, "include") == 0) {
             i++; 
             if (tokens[i].text[0] == '<') {
@@ -116,7 +114,6 @@ void parse_and_gen(FILE* out) {
             continue;
         }
 
-        // 2. 处理 struct 定义
         if (strcmp(t, "struct") == 0 && tokens[i+1].type == TOK_IDENT) {
             char struct_name[64];
             strcpy(struct_name, tokens[i+1].text);
@@ -134,7 +131,6 @@ void parse_and_gen(FILE* out) {
             continue;
         }
 
-        // 3. 处理 comptime for（核心灵魂）
         if (strcmp(t, "comptime") == 0) {
             i += 1;
             if (strcmp(tokens[i].text, "for") == 0) {
@@ -156,13 +152,9 @@ void parse_and_gen(FILE* out) {
                     if (brace_depth == 0) break;
                     template_end++;
                 }
-
-                // 提取生成的函数名（用于自动生成 execute）
-                char func_names[256] = "";
                 
                 for (int op = start_val; op < end_val; op++) {
                     char num_str[16]; sprintf(num_str, "%d", op);
-                    // 极致性能：加上 static inline 强制内联
                     fprintf(out, "static inline "); 
                     
                     for (int k = template_start; k < template_end; k++) {
@@ -170,11 +162,7 @@ void parse_and_gen(FILE* out) {
                             tokens[k+1].text[0] == '{' && tokens[k+2].type == TOK_IDENT &&
                             strcmp(tokens[k+2].text, loop_var) == 0 && tokens[k+3].text[0] == '}') {
                             
-                            // 记录函数名
-                            char fname[128]; sprintf(fname, "%s%s", tokens[k].text, num_str);
-                            if (func_names[0] == '\0') strcpy(func_names, fname);
-                            
-                            fprintf(out, "%s", fname);
+                            fprintf(out, "%s%s", tokens[k].text, num_str);
                             k += 3;
                         } else if (tokens[k].text[0] == '{' && tokens[k+1].type == TOK_IDENT && 
                                    strcmp(tokens[k+1].text, loop_var) == 0 && tokens[k+2].text[0] == '}') {
@@ -188,7 +176,6 @@ void parse_and_gen(FILE* out) {
                     fprintf(out, "\n");
                 }
                 
-                // 自动生成 execute 分发器
                 fprintf(out, "\nstatic inline int execute(int inst, CPU* cpu) {\n");
                 fprintf(out, "    switch (inst) {\n");
                 for (int op = start_val; op < end_val; op++) {
@@ -202,36 +189,31 @@ void parse_and_gen(FILE* out) {
             }
         }
 
-        // 4. 处理函数定义 fn
         if (strcmp(t, "fn") == 0 && tokens[i+1].type == TOK_IDENT) {
             char* func_name = tokens[i+1].text; i += 2;
             fprintf(out, "int %s", func_name); 
             parse_function_params(out, i + 1, &i);
-            while (tokens[i;
-].text[0] != '{' && i < token_count) i++;
+            while (tokens[i].text[0] != '{' && i < token_count) i++;
             fprintf(out, " {\n"); 
             continue;
         }
 
-        // 5. 处理 let
         if (strcmp(t, "let") == 0 && tokens[i+1].type == TOK_IDENT) {
             char* var_name = tokens[i+1].text;
             if (i+4 < token_count && tokens[i+2].text[0] == '=' && tokens[i+3].type == TOK_IDENT && tokens[i+4].text[0] == '[') {
                 fprintf(out, "    %s %s[%s];\n", tokens[i+3].text, var_name, tokens[i+5].text); i += 7; continue;
             }
-            if (                       i+3 < token_count && tokens[i+2 token].text[0] == '=' && tokens[i+3]. =type == TOK str_IDENT && strcmp(tokens[i+3tok].text, "CPU") == 0) {
+            if (i+3 < token_count && tokens[i+2].text[0] == '=' && tokens[i+3].type == TOK_IDENT && strcmp(tokens[i+3].text, "CPU") == 0) {
                 fprintf(out, "    CPU %s = {0};\n", var_name); i += 4;
                 while (tokens[i].text[0] != ';' && i < token_count) i++;
                 continue;
             }
-            // 极致简易：依靠 Clang 的 __auto_type 实现零成本类型推导
             fprintf(out, "    __auto_type %s = ", var_name); i += 3;
             while (tokens[i].text[0] != ';' && i < token_count) { fprintf(out, "%s ", tokens[i].text); i++; }
             fprintf(out, ";\n");
             continue;
         }
 
-        // 6. 处理 print（极致简易 + 泛型性能）
         if (strcmp(t, "print") == 0) {
             i += 1; if (tokens[i].text[0] == '(') i += 1;
             if (tokens[i].type == TOK_STRING) {
@@ -241,29 +223,30 @@ void parse_and_gen(FILE* out) {
                 while (content[pos] != '\0') {
                     if (content[pos] == '{') { in_var = true; pos++; continue; }
                     if (content[pos] == '}') {
-                        in_var = false; if (arg_pos > 0) strcat(args, ", "); strcat(args, var_name); arg_pos = 1; var_name[0] = '\0';
-                        // 使用 _Generic 占位符，完美解决类型问题
+                        in_var = false; 
+                        if (arg_pos > 0) strcat(args, ", "); 
+                        strcat(args, var_name); 
+                        arg_pos = 1; 
+                        var_name[0] = '\0';
                         strcat(format, "%s"); pos++; continue;
                     }
                     if (in_var) { var_name[var_pos++] = content[pos++]; var_name[var_pos] = '\0'; } 
                     else { 
-                        if (content[pos] == '%') { format[fmt_pos++] = '%'; format[fmt_pos++] = '%'; } // 转义
+                        if (content[pos] == '%') { format[fmt_pos++] = '%'; format[fmt_pos++] = '%'; } 
                         else format[fmt_pos++] = content[pos]; 
                         pos++; 
                     }
                 }
                 format[fmt_pos] = '\0';
-                // 生成 _CSTAR_PRINT 调用
                 if (arg_pos > 0) {
-                    // 为了优雅，这里稍微处理一下参数
                     fprintf(out, "    printf(\"%s\\n\", ", format);
-                    // 临时替换掉参数
                     char* token = strtok(args, ", ");
                     bool first_arg = true;
                     while (token != NULL) {
                         if (!first_arg) fprintf(out, ", ");
                         fprintf(out, "_CSTAR_PRINT(%s)", token);
-                        first_arg = false(NULL, ", ");
+                        first_arg = false;
+                        token = strtok(NULL, ", ");
                     }
                     fprintf(out, ");\n");
                 } else {
@@ -274,7 +257,6 @@ void parse_and_gen(FILE* out) {
             continue;
         }
 
-        // 7. 控制流 (if / while / return)
         if (strcmp(t, "while") == 0) {
             char cond[256] = ""; i += 1;
             while (tokens[i].text[0] != '{' && i < token_count) { strcat(cond, tokens[i].text); strcat(cond, " "); i++; }
@@ -293,7 +275,6 @@ void parse_and_gen(FILE* out) {
             fprintf(out, ";\n"); continue;
         }
 
-        // 8. 赋值与函数调用
         if ((tokens[i].type == TOK_IDENT || t[0] == '(' || t[0] == '*') && i + 1 < token_count) {
             int lookahead = i; bool is_assign = false;
             while (lookahead < token_count && tokens[lookahead].text[0] != ';' && tokens[lookahead].text[0] != '{' && tokens[lookahead].text[0] != '}') {
