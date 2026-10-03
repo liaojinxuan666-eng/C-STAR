@@ -10,7 +10,7 @@
 #define MAX_SYMBOLS 1000
 
 /*
- * C* v0.7
+ * C* v0.9
  *
  * The frontend now parses ordinary runtime expressions into an AST.
  * Comptime conditions are parsed through the same expression AST used by
@@ -138,6 +138,7 @@ typedef struct {
     int return_end;
     int params_start;
     int params_end;
+    int is_extern;
     Stmt *body;
 } FunctionDecl;
 
@@ -938,11 +939,18 @@ static Program parse_program(void) {
             continue;
         }
 
+        if (tok_is(i, "extern") && tok_is(i + 1, "fn")) {
+            i += 1;
+        }
+
         if (tok_is(i, "fn")) {
+            int is_extern = false;
+            if (i > 0 && tok_is(i - 1, "extern")) is_extern = true;
             if (i + 1 >= token_count || tokens[i + 1].type != TOK_IDENT) die_at(i, "expected function name");
             FunctionDecl d;
             memset(&d, 0, sizeof(d));
             d.name = xstrdup(tokens[i + 1].text);
+            d.is_extern = is_extern;
             int j = i + 2;
             while (j < token_count && !tok_is(j, "(")) ++j;
             if (j >= token_count) die_at(i, "expected '(' in function declaration");
@@ -957,11 +965,23 @@ static Program parse_program(void) {
             if (tok_is(j, "->")) {
                 d.return_start = j + 1;
                 j += 1;
-                while (j < token_count && !tok_is(j, "{")) ++j;
+                if (is_extern) {
+                    while (j < token_count && !tok_is(j, ";")) ++j;
+                } else {
+                    while (j < token_count && !tok_is(j, "{")) ++j;
+                }
                 d.return_end = j;
             } else {
                 d.return_start = d.return_end = j;
             }
+            if (is_extern) {
+                if (!tok_is(j, ";")) die_at(j, "expected ';' after extern function declaration");
+                d.body = NULL;
+                program_add_function(&p, d);
+                i = j + 1;
+                continue;
+            }
+
             if (!tok_is(j, "{")) die_at(j, "expected '{' after function declaration");
             int body_close = find_matching_brace(j, token_count);
             if (body_close >= token_count) die_at(j, "unterminated function body");
@@ -1767,7 +1787,7 @@ static void typecheck_program(const Program *p) {
             char pn[128]; CType pt = type_unknown();
             if (function_param_at(fn, p, pi, pn, sizeof(pn), &pt) && pt.kind != TYPE_UNKNOWN) { env_push(&env, pn, pt); free_type(&pt); }
         }
-        check_stmt_list(p, &env, fn->body, ret);
+        if (!fn->is_extern) check_stmt_list(p, &env, fn->body, ret);
         free_type(&ret); env_free(&env);
     }
 }
@@ -1802,8 +1822,29 @@ static void emit_program(FILE *out, Program *p) {
 
     for (size_t c = 0; c < p->comptime_count; ++c) emit_comptime(out, &p->comptimes[c]);
 
+    /* C ABI declarations are emitted as ordinary C prototypes. */
     for (size_t f = 0; f < p->function_count; ++f) {
         FunctionDecl *fn = &p->functions[f];
+        if (!fn->is_extern) continue;
+        if (fn->return_start < fn->return_end) {
+            for (int k = fn->return_start; k < fn->return_end; ++k) {
+                fputs(tokens[k].text, out);
+                if (k + 1 < fn->return_end) fputc(' ', out);
+            }
+        } else {
+            fputs("int", out);
+        }
+        fputc(' ', out);
+        fputs(fn->name, out);
+        if (fn->params_start >= fn->params_end) fputs("(void)", out);
+        else emit_function_params(out, fn->params_start, fn->params_end);
+        fputs(";\n", out);
+    }
+    if (p->function_count) fputc('\n', out);
+
+    for (size_t f = 0; f < p->function_count; ++f) {
+        FunctionDecl *fn = &p->functions[f];
+        if (fn->is_extern) continue;
         if (fn->return_start < fn->return_end && tok_is(fn->return_start, "->")) {
             for (int k = fn->return_start + 1; k < fn->return_end; ++k) {
                 fprintf(out, "%s", tokens[k].text);
@@ -1848,7 +1889,7 @@ static void emit_includes_directly(FILE *out) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "C* Compiler v0.8\nUsage: %s <file.cppo>\n", argv[0]);
+        fprintf(stderr, "C* Compiler v0.9\nUsage: %s <file.cppo>\n", argv[0]);
         return 1;
     }
 
@@ -1896,6 +1937,6 @@ int main(int argc, char **argv) {
     free_program(&program);
     clear_symbols();
 
-    printf("[C* Compiler v0.8] compiled successfully, output.c generated\n");
+    printf("[C* Compiler v0.9] compiled successfully, output.c generated\n");
     return 0;
 }

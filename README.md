@@ -1,49 +1,42 @@
-# C* v0.8 — AST Comptime
+# C* v0.9 — C ABI / Native Interop
 
-核心目标：让 Comptime 条件与运行时代码共用 Expression AST，并用 AST evaluator 在编译期求值。
+C* v0.9 keeps the v0.8 AST + Comptime pipeline and adds a minimal, explicit C ABI boundary.
 
-## 本版变化
+## New
 
-- Comptime `if` 条件改为复用 Expression AST。
-- 新增 AST 整数求值：`+ - * / % << >> & | ^`。
-- 支持编译期比较与逻辑：`== != < > <= >= && ||`。
-- 支持编译期一元运算：`+ - ! ~`。
-- 编译期除零/未知标识符会直接报错。
-- 类型检查可以识别由 Comptime 特化生成的函数，并检查参数数量/类型。
-- 推导类型的 `let` 不再依赖 GCC `__auto_type`，生成标准 C 类型。
-- 生成 C 时避免 `main()` 的 strict-prototypes 警告。
-- 专化函数使用可移植的 `CSTAR_UNUSED` 宏，未调用的特化函数不会制造 clang unused-function 警告。
+- `extern fn` declarations for native C functions.
+- C-compatible prototypes are emitted before C* function definitions.
+- Parameter and return types use the existing C* type system.
+- External functions can return `void` and accept zero parameters.
+- External calls participate in existing argument-count and type checking.
+- External symbol names are emitted unchanged.
 
-## 测试
+Example:
 
-已通过 clang `-std=c11 -Wall -Wextra -pedantic` 编译 C* 编译器本身。
+```cppo
+include <stdint.h>
 
-回归测试：
+extern fn host_add(a: int, b: int) -> int;
+extern fn host_ping() -> void;
 
-- `comptime_if.cppo` → `op_0: 0`, `op_1: 11`, `op_2: 20`, `op_3: 13`
-- `hello.cppo` → `2 + 3 = 5`
-- `ptr_test.cppo` → `op_0: 10`, `op_1: 11`, `op_3: 13`
-- `sim_test.cppo` → `other step`, `step one`, `other step`
-- `type_system.cppo` → `types: ok 10`
-- `comptime_ast.cppo` → `comptime ast: 2296`
+fn main() -> int {
+    let x: int = host_add(20, 22);
+    host_ping();
+    return x;
+}
+```
 
-输出 C 使用 clang `-std=gnu11 -Wall -Wextra -Wpedantic -O3` 编译，以上测试无 warning、无 error。
-
-## 使用
-
-把 `src/cstar.c` 替换到你的 C* 工程，然后：
+The generated C can be linked directly with an ordinary C object/source file:
 
 ```sh
-cd /var/mobile/Documents/cstar-test
-clang src/cstar.c -o cstar
-./cstar tests/comptime_ast.cppo
-clang -O3 output.c -o comptime-test
-./comptime-test
+clang -std=c11 -Wall -Wextra -Wpedantic src/cstar.c -o cstar
+./cstar tests/ffi_test.cppo
+clang -std=c11 -Wall -Wextra -Wpedantic output.c tests/ffi_host.c -o ffi-test
+./ffi-test
 ```
 
-期望：
+## Pipeline
 
-```text
-[C* Compiler v0.8] compiled successfully, output.c generated
-comptime ast: 2296
-```
+`.cppo → AST → Typecheck → Comptime → C backend → Clang -O3 → native code`
+
+v0.9 does not add a VM, GC, or hidden runtime. The ABI boundary is explicit and remains compatible with the generated C layer.

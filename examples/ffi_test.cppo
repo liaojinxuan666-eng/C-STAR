@@ -1,0 +1,21 @@
+include <stdint.h>
+
+extern fn host_add(a: int, b: int) -> int;
+extern fn host_mix(a: u64, b: u64) -> u64;
+extern fn host_ping() -> void;
+
+fn main() -> int {
+    let x: int = host_add(20, 22);
+    let y: u64 = host_mix(7, 5);
+    host_ping();
+    if x == 42 {
+        if y == 75 {
+            print("ffi test: ok");
+        } else {
+            print("ffi test: bad u64");
+        }
+    } else {
+        print("ffi test: bad int");
+    }
+    return 0;
+}
