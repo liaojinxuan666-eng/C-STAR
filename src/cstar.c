@@ -17,8 +17,16 @@ int symbol_count = 0;
 int find_matching_brace(int start, int limit) {
     int depth = 0;
     for (int i = start; i < limit; i++) {
-        if (tokens[i].text[0] == '{') depth++;
+        if (tokens[i].text[0] == '{') {
+            if (i + 2 < limit && (tokens[i+1].type == TOK_IDENT || tokens[i+1].type == TOK_NUMBER) && tokens[i+2].text[0] == '}') {
+                continue;
+            }
+            depth++;
+        }
         if (tokens[i].text[0] == '}') {
+            if (i - 2 >= 0 && tokens[i-2].text[0] == '{' && (tokens[i-1].type == TOK_IDENT || tokens[i-1].type == TOK_NUMBER)) {
+                continue;
+            }
             depth--;
             if (depth == 0) return i;
         }
@@ -83,14 +91,30 @@ void unroll_comptime_block(FILE* out, int start, int end, char* loop_var, int op
             int result = eval_expr(cond_start, cond_end, loop_var, op);
             
             int if_start = cond_end + 1;
-            while (tokens[if_start].text[0] != '{') if_start++;
+            while (if_start < end) {
+                if (tokens[if_start].text[0] == '{') {
+                    if (if_start + 2 < end && (tokens[if_start+1].type == TOK_IDENT || tokens[if_start+1].type == TOK_NUMBER) && tokens[if_start+2].text[0] == '}') {
+                        if_start++; continue;
+                    }
+                    break;
+                }
+                if_start++;
+            }
             int if_end = find_matching_brace(if_start, end);
             
             int next_k = if_end + 1;
             int else_start = -1, else_end = -1;
             if (next_k < end && strcmp(tokens[next_k].text, "else") == 0) {
                 else_start = next_k + 1;
-                while (tokens[else_start].text[0] != '{') else_start++;
+                while (else_start < end) {
+                    if (tokens[else_start].text[0] == '{') {
+                        if (else_start + 2 < end && (tokens[else_start+1].type == TOK_IDENT || tokens[else_start+1].type == TOK_NUMBER) && tokens[else_start+2].text[0] == '}') {
+                            else_start++; continue;
+                        }
+                        break;
+                    }
+                    else_start++;
+                }
                 else_end = find_matching_brace(else_start, end);
             }
 
@@ -206,7 +230,22 @@ void parse_and_gen(FILE* out) {
                 int end_val = atoi(tokens[i].text); i += 1;
                 if (tokens[i].text[0] == ')') i += 1; if (tokens[i].text[0] == '{') i += 1;
                 int template_start = i; int template_end = i; int brace_depth = 1;
-                while (template_end < token_count && brace_depth > 0) { if (tokens[template_end].text[0] == '{') brace_depth++; if (tokens[template_end].text[0] == '}') brace_depth--; if (brace_depth == 0) break; template_end++; }
+                while (template_end < token_count && brace_depth > 0) {
+                    if (tokens[template_end].text[0] == '{') {
+                        if (template_end + 2 < token_count && (tokens[template_end+1].type == TOK_IDENT || tokens[template_end+1].type == TOK_NUMBER) && tokens[template_end+2].text[0] == '}') {
+                            template_end++; continue;
+                        }
+                        brace_depth++;
+                    }
+                    if (tokens[template_end].text[0] == '}') {
+                        if (template_end - 2 >= 0 && tokens[template_end-2].text[0] == '{' && (tokens[template_end-1].type == TOK_IDENT || tokens[template_end-1].type == TOK_NUMBER)) {
+                            template_end++; continue;
+                        }
+                        brace_depth--;
+                    }
+                    if (brace_depth == 0) break;
+                    template_end++;
+                }
                 for (int op = start_val; op < end_val; op++) {
                     unroll_comptime_block(out, template_start, template_end, loop_var, op);
                     fprintf(out, "\n");
