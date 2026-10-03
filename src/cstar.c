@@ -103,30 +103,37 @@ void unroll_comptime_block(FILE* out, int start, int end, char* loop_var, int op
             while (tokens[if_start].text[0] != '{') if_start++;
             int if_end = find_matching_brace(if_start, end);
             
-            if (result) {
-                unroll_comptime_block(out, if_start + 1, if_end, loop_var, op);
+            int else_start = -1;
+            int else_end = -1;
+            if (if_end + 1 < end && strcmp(tokens[if_end + 1].text, "else") == 0) {
+                else_start = if_end + 2;
+                while (tokens[else_start].text[0] != '{') else_start++;
+                else_end = find_matching_brace(else_start, end);
             }
             
-            int next_k = if_end + 1;
-            if (next_k < end && strcmp(tokens[next_k].text, "else") == 0) {
-                int else_start = next_k + 1;
-                while (tokens[else_start].text[0] != '{') else_start++;
-                int else_end = find_matching_brace(else_start, end);
-                
-                if (!result) {
+            if (result) {
+                unroll_comptime_block(out, if_start + 1, if_end, loop_var, op);
+            } else {
+                if (else_start != -1) {
                     unroll_comptime_block(out, else_start + 1, else_end, loop_var, op);
                 }
-                next_k = else_end + 1;
             }
-            k = next_k - 1;
+            
+            if (else_end != -1) {
+                k = else_end;
+            } else {
+                k = if_end;
+            }
         } else {
+            if (strcmp(tokens[k].text, "int") == 0 && k + 1 < end && strncmp(tokens[k+1].text, "op_", 3) == 0) {
+                fprintf(out, "static inline ");
+            }
             if (tokens[k].type == TOK_IDENT && k + 3 < end &&
                 tokens[k+1].text[0] == '{' && tokens[k+2].type == TOK_IDENT &&
                 strcmp(tokens[k+2].text, loop_var) == 0 && tokens[k+3].text[0] == '}') {
-                
                 fprintf(out, "%s%d", tokens[k].text, op);
                 k += 3;
-            } else if (tokens[k].text[0] == '{' && tokens[k+1].type == TOK_IDENT && 
+            } else if (tokens[k].text[0] == '{' && k + 2 < end && tokens[k+1].type == TOK_IDENT && 
                        strcmp(tokens[k+1].text, loop_var) == 0 && tokens[k+2].text[0] == '}') {
                 fprintf(out, "%d", op);
                 k += 2;
@@ -290,7 +297,6 @@ void parse_and_gen(FILE* out) {
                 }
                 
                 for (int op = start_val; op < end_val; op++) {
-                    fprintf(out, "static inline ");
                     unroll_comptime_block(out, template_start, template_end, loop_var, op);
                     fprintf(out, "\n");
                 }
