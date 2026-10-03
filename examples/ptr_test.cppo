@@ -8,15 +8,11 @@ comptime for op in 0 to 4 {
 
 fn main() -> int {
     let cpu = CPU();
-    
     op_0(&cpu);
     print("op_0: {cpu.x0}");
-    
     op_1(&cpu);
     print("op_1: {cpu.x0}");
-    
     op_3(&cpu);
     print("op_3: {cpu.x0}");
-    
     return 0;
 }

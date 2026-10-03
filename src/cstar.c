@@ -56,7 +56,6 @@ void parse_and_gen(FILE* out) {
     for (int i = 0; i < token_count; i++) {
         char* t = tokens[i].text;
 
-        // comptime 编译期穷举 (纯文本展开，绝不报错)
         if (strcmp(t, "comptime") == 0) {
             i += 1;
             if (strcmp(tokens[i].text, "for") == 0) {
@@ -79,7 +78,6 @@ void parse_and_gen(FILE* out) {
                     template_end++;
                 }
 
-                // 纯文本替换：只替换 {op}，其他原样输出
                 for (int op = start_val; op < end_val; op++) {
                     char num_str[16]; sprintf(num_str, "%d", op);
                     for (int k = template_start; k < template_end; k++) {
@@ -87,7 +85,11 @@ void parse_and_gen(FILE* out) {
                             fprintf(out, "%s", num_str);
                             k += 2;
                         } else {
-                            fprintf(out, "%s ", tokens[k].text);
+                            if (tokens[k].type == TOK_SYMBOL) {
+                                fprintf(out, "%s", tokens[k].text);
+                            } else {
+                                fprintf(out, "%s ", tokens[k].text);
+                            }
                         }
                     }
                     fprintf(out, "\n");
@@ -97,7 +99,6 @@ void parse_and_gen(FILE* out) {
             }
         }
 
-        // 1. struct
         if (strcmp(t, "struct") == 0 && tokens[i+1].type == TOK_IDENT) {
             char* sname = tokens[i+1].text; strcpy(struct_names[s_count++], sname);
             fprintf(out, "typedef struct %s {\n", sname); i += 3;
@@ -107,7 +108,6 @@ void parse_and_gen(FILE* out) {
             fprintf(out, "} %s;\n\n", sname); continue;
         }
 
-        // 2. fn
         if (strcmp(t, "fn") == 0 && tokens[i+1].type == TOK_IDENT) {
             char* func_name = tokens[i+1].text; i += 2;
             fprintf(out, "int %s", func_name); parse_function_params(out, i + 1, &i);
@@ -115,7 +115,6 @@ void parse_and_gen(FILE* out) {
             fprintf(out, " {\n"); continue;
         }
 
-        // 3. let
         if (strcmp(t, "let") == 0 && tokens[i+1].type == TOK_IDENT) {
             char* var_name = tokens[i+1].text;
             if (i+4 < token_count && tokens[i+2].text[0] == '=' && tokens[i+3].type == TOK_IDENT && tokens[i+4].text[0] == '[') {
@@ -136,7 +135,6 @@ void parse_and_gen(FILE* out) {
             continue;
         }
 
-        // 4. print
         if (strcmp(t, "print") == 0) {
             i += 1; if (tokens[i].text[0] == '(') i += 1;
             if (tokens[i].type == TOK_STRING) {
@@ -158,28 +156,24 @@ void parse_and_gen(FILE* out) {
             continue;
         }
 
-        // 5. while
         if (strcmp(t, "while") == 0) {
             char cond[256] = ""; i += 1;
             while (tokens[i].text[0] != '{' && i < token_count) { strcat(cond, tokens[i].text); strcat(cond, " "); i++; }
             fprintf(out, "    while (%s) {\n", cond); continue;
         }
 
-        // 6. if
         if (strcmp(t, "if") == 0) {
             char cond[256] = ""; i += 1;
             while (tokens[i].text[0] != '{' && i < token_count) { strcat(cond, tokens[i].text); strcat(cond, " "); i++; }
             fprintf(out, "    if (%s) {\n", cond); continue;
         }
 
-        // 7. return
         if (strcmp(t, "return") == 0) {
             fprintf(out, "    return "); i += 1;
             while (tokens[i].text[0] != ';' && i < token_count) { fprintf(out, "%s ", tokens[i].text); i++; }
             fprintf(out, ";\n"); continue;
         }
 
-        // 8. assignment
         if ((tokens[i].type == TOK_IDENT || t[0] == '(' || t[0] == '*') && i + 1 < token_count) {
             int lookahead = i; bool is_assign = false;
             while (lookahead < token_count && tokens[lookahead].text[0] != ';' && tokens[lookahead].text[0] != '{' && tokens[lookahead].text[0] != '}') {
@@ -193,14 +187,12 @@ void parse_and_gen(FILE* out) {
             }
         }
 
-        // 9. standalone function call
         if (tokens[i].type == TOK_IDENT && i + 1 < token_count && tokens[i+1].text[0] == '(') {
             fprintf(out, "    ");
             while (tokens[i].text[0] != ';' && i < token_count) { fprintf(out, "%s ", tokens[i].text); i++; }
             fprintf(out, ";\n"); continue;
         }
 
-        // 10. right brace
         if (t && t[0] == '}') {
             if (i + 1 < token_count && strcmp(tokens[i+1].text, "else") == 0) { fprintf(out, "    } else {\n"); i++; }
             else { fprintf(out, "}\n\n"); }
