@@ -10,7 +10,6 @@ typedef struct { TokenType type; char text[256]; } Token;
 Token tokens[40000];
 int token_count = 0;
 
-// ================= 词法分析 (Lexer) =================
 void lex(const char* src) {
     int i = 0;
     while (src[i] != '\0') {
@@ -50,9 +49,7 @@ void lex(const char* src) {
             token_count++; continue; 
         }
         
-        // 单独处理 & 符号，防止被吞
         if (src[i] == '&') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, "&"); token_count++; i++; continue; }
-        
         if (src[i] == '=' && src[i+1] == '=') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, "=="); token_count++; i += 2; continue; }
         if (src[i] == '!' && src[i+1] == '=') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, "!="); token_count++; i += 2; continue; }
         if (src[i] == '<' && src[i+1] == '=') { tokens[token_count].type = TOK_SYMBOL; strcpy(tokens[token_count].text, "<="); token_count++; i += 2; continue; }
@@ -70,7 +67,6 @@ void lex(const char* src) {
     strcpy(tokens[token_count].text, "EOF");
 }
 
-// ================= 辅助代码生成 =================
 void parse_function_params(FILE* out, int start_idx, int* end_idx) {
     int i = start_idx;
     fprintf(out, "(");
@@ -89,13 +85,11 @@ void parse_function_params(FILE* out, int start_idx, int* end_idx) {
         }
         
         if (param_count >= 3 && strcmp(param_tokens[1], ":") == 0) {
-            // C* 风格 "name: type" -> C 风格 "type name"
             fprintf(out, "%s %s", param_tokens[2], param_tokens[0]);
             if (param_count > 3) {
                 for (int k = 3; k < param_count; k++) fprintf(out, "%s", param_tokens[k]);
             }
         } else {
-            // C 风格 "type name" 或 "type *name" 直接透传
             for (int k = 0; k < param_count; k++) {
                 fprintf(out, "%s", param_tokens[k]);
                 if (k < param_count - 1) fprintf(out, " ");
@@ -108,7 +102,6 @@ void parse_function_params(FILE* out, int start_idx, int* end_idx) {
     *end_idx = i;
 }
 
-// ================= 语法分析与 C 代码生成 =================
 void parse_and_gen(FILE* out) {
     fprintf(out, "#include <stdio.h>\n#include <stdint.h>\n#include <stdlib.h>\n\n");
     fprintf(out, "typedef uint64_t u64;\ntypedef uint32_t u32;\ntypedef uint16_t u16;\ntypedef uint8_t u8;\n\n");
@@ -119,7 +112,7 @@ void parse_and_gen(FILE* out) {
     fprintf(out, "    long: \"%%ld\", unsigned long: \"%%lu\", \\\n");
     fprintf(out, "    long long: \"%%lld\", unsigned long long: \"%%llu\", \\\n");
     fprintf(out, "    float: \"%%f\", double: \"%%f\", \\\n");
-    fprintf(out, "    default: \"%%llu\")(x)\n\n");
+    fprintf(out, "    default: \"%%llu\")\n\n");
 
     for (int i = 0; i < token_count; i++) {
         char* t = tokens[i].text;
@@ -199,7 +192,14 @@ void parse_and_gen(FILE* out) {
                     fprintf(out, "\n");
                 }
                 
-                // 核心修改：移除硬编码的 execute 生成，完全由用户在 .cppo 中自行决定调用方式
+                fprintf(out, "\nstatic inline int execute(int inst, CPU* cpu) {\n");
+                fprintf(out, "    switch (inst) {\n");
+                for (int op = start_val; op < end_val; op++) {
+                    fprintf(out, "        case %d: return op_%d(cpu);\n", op, op);
+                }
+                fprintf(out, "        default: return -1;\n");
+                fprintf(out, "    }\n}\n\n");
+
                 i = template_end;
                 continue;
             }
@@ -253,7 +253,7 @@ void parse_and_gen(FILE* out) {
             if (tokens[i].type == TOK_STRING) {
                 char* raw = tokens[i].text; char content[256];
                 strncpy(content, raw + 1, strlen(raw) - 2); content[strlen(raw) - 2] = '\0';
-                char format[256] = ""; char args[256] = ""; int pos = 0, fmt_pos = 0, arg_pos = 0; bool in_var = false; char var_name[64] = ""; int var_pos = 0;
+                char format[256] = ""; char args[512] = ""; int pos = 0, fmt_pos = 0, arg_pos = 0; bool in_var = false; char var_name[64] = ""; int var_pos = 0;
                 while (content[pos] != '\0') {
                     if (content[pos] == '{') { in_var = true; pos++; continue; }
                     if (content[pos] == '}') {
@@ -274,12 +274,11 @@ void parse_and_gen(FILE* out) {
                 format[fmt_pos] = '\0';
                 if (arg_pos > 0) {
                     fprintf(out, "    printf(\"%s\\n\", ", format);
-                    // 用 strtok 切割出 cpu.x0 这种复合成员表达式
                     char* token = strtok(args, ", ");
                     bool first_arg = true;
                     while (token != NULL) {
                         if (!first_arg) fprintf(out, ", ");
-                        fprintf(out, "_CSTAR_PRINT(%s)", token);
+                        fprintf(out, "_CSTAR_PRINT(%s), %s", token, token);
                         first_arg = false;
                         token = strtok(NULL, ", ");
                     }
