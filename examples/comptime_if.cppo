@@ -1,10 +1,9 @@
 struct CPU {
-    u64 pc;
     u64 x0;
 }
 
 comptime for op in 0 to 4 {
-    if (op % 2 == 0) {
+    if op % 2 == 0 {
         int op_{op}(CPU* cpu) { cpu->x0 = {op} * 10; return 0; }
     } else {
         int op_{op}(CPU* cpu) { cpu->x0 = {op} + 10; return 0; }
@@ -13,13 +12,18 @@ comptime for op in 0 to 4 {
 
 fn main() -> int {
     let cpu = CPU();
-    cpu.pc = 0;
-    cpu.x0 = 0;
+    
     op_0(&cpu);
+    print("op_0: {cpu.x0}");
+    
     op_1(&cpu);
+    print("op_1: {cpu.x0}");
+    
     op_2(&cpu);
+    print("op_2: {cpu.x0}");
+    
     op_3(&cpu);
-    print("Final PC = {cpu.pc}");
-    print("Final X0 = {cpu.x0}");
+    print("op_3: {cpu.x0}");
+    
     return 0;
 }
