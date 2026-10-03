@@ -1,38 +1,42 @@
-# C* v0.6 — Expression AST
+# C* v0.7 — Type System Foundation
 
-本版本继续保持 C* v0.5 已通过的 Comptime 路径不变，重点把运行时代码的表达式从“原始 token 直接输出 C”升级为真正的表达式 AST。
+v0.7 在 v0.6 Expression AST 基础上加入最小类型系统与静态检查，同时保持原有 C backend 和 Comptime 专化路径。
 
-## 新增
+## 支持
 
-- 基本字面量：整数、字符串、标识符
-- 一元运算：`& * + - ! ~`
-- 二元运算与优先级：`= += -= *= /= %= || && | ^ & == != < > <= >= << >> + - * / %`
-- 函数调用：`foo(a, b)`
-- 成员访问：`cpu.x0`、`cpu->x0`
-- `let`、`return`、`if`、`while`、普通表达式语句全部走 AST
-- 保留 `let cpu = CPU()` 的特殊构造行为
-- 保留 v0.5 Comptime 专化生成路径
+- 基础类型：`int`, `i8/i16/i32/i64`, `u8/u16/u32/u64`, `bool`, `void`
+- 结构体类型：`struct Name { ... }`
+- 指针类型：`T*`，包括 `Pair*`
+- `let name: Type = expr` 显式类型
+- `let name = expr` 类型推导
+- `let value = Type()` 结构体零初始化构造
+- 函数参数类型检查
+- 函数返回值类型检查
+- 算术、比较、逻辑、位运算的基本类型检查
+- `&` / `*`、`.` / `->` 的基本类型检查
+- 基本赋值兼容性检查
 
-## 目标
+## 保持不变
 
-继续保持 C* 的三个原则：
-
-> 极致的性能，优秀的兼容，极致的简易
+v0.6 的 Expression AST、函数调用、成员访问、Comptime for / comptime if 均保留。
 
 编译链仍然是：
 
 `.cppo → C* → generated C → clang -O3 → native`
 
-## 回归测试
+## 新测试
 
-原 v0.5 四个测试应继续通过：
+`tests/type_system.cppo` 应输出：
 
-- `comptime_if.cppo`
-- `hello.cppo`
-- `ptr_test.cppo`
-- `sim_test.cppo`
+```text
+types: ok 10
+```
 
-新增：
+## 编译器
 
-- `expr_ast.cppo`
-- `expr_logic.cppo`
+```sh
+clang src/cstar.c -o cstar
+./cstar tests/type_system.cppo
+clang -O3 output.c -o type-test
+./type-test
+```

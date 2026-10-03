@@ -1,0 +1,26 @@
+struct Pair {
+    u64 left;
+    u64 right;
+};
+
+fn add64(a: u64, b: u64) -> u64 {
+    return a + b;
+}
+
+fn main() -> int {
+    let a: u64 = 10;
+    let b: u64 = 20;
+    let p: Pair = Pair();
+    p.left = add64(a, b);
+    p.right = p.left + 7;
+
+    let q: Pair* = &p;
+    q->right += 3;
+
+    if q->right == 40 {
+        print("types: ok {a}");
+    } else {
+        print("types: bad {q->right}");
+    }
+    return 0;
+}

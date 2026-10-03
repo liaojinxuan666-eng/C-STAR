@@ -10,7 +10,7 @@
 #define MAX_SYMBOLS 1000
 
 /*
- * C* v0.6
+ * C* v0.7
  *
  * The frontend now parses ordinary runtime expressions into an AST.
  * Comptime templates intentionally remain token-oriented for now so the
@@ -96,7 +96,11 @@ struct Stmt {
         struct {
             char *name;
             int is_cpu_ctor;
+            char *ctor_type;
             Expr *expr;
+            int type_start;
+            int type_end;
+            int has_explicit_type;
         } let_stmt;
         struct {
             Expr *expr;
@@ -150,6 +154,32 @@ typedef struct {
     ComptimeDecl *comptimes;
     size_t comptime_count;
 } Program;
+
+typedef enum {
+    TYPE_UNKNOWN,
+    TYPE_VOID,
+    TYPE_BOOL,
+    TYPE_INT,
+    TYPE_UINT,
+    TYPE_PTR,
+    TYPE_STRUCT,
+    TYPE_STRING
+} TypeKind;
+
+typedef struct CType CType;
+struct CType {
+    TypeKind kind;
+    int bits;
+    int is_signed;
+    char name[128];
+    CType *base;
+};
+
+typedef struct {
+    char *name;
+    CType type;
+} LocalSymbol;
+
 
 static Token tokens[MAX_TOKENS];
 static int token_count = 0;
@@ -411,6 +441,7 @@ static void free_stmt_list(Stmt *stmt) {
         switch (stmt->kind) {
             case ST_LET:
                 free(stmt->as.let_stmt.name);
+                free(stmt->as.let_stmt.ctor_type);
                 free_expr(stmt->as.let_stmt.expr);
                 break;
             case ST_RETURN:
@@ -650,18 +681,33 @@ static Stmt *parse_statements(int start, int end) {
             Stmt *s = new_stmt(ST_LET);
             s->as.let_stmt.name = xstrdup(tokens[i + 1].text);
             s->as.let_stmt.is_cpu_ctor = false;
+            s->as.let_stmt.ctor_type = NULL;
+            s->as.let_stmt.type_start = s->as.let_stmt.type_end = -1;
+            s->as.let_stmt.has_explicit_type = false;
             i += 2;
-            if (!tok_is(i, "=")) die_at(i, "expected '=' after let name");
+            if (tok_is(i, ":")) {
+                ++i;
+                s->as.let_stmt.has_explicit_type = true;
+                s->as.let_stmt.type_start = i;
+                while (i < end && !tok_is(i, "=")) ++i;
+                s->as.let_stmt.type_end = i;
+            }
+            if (!tok_is(i, "=")) die_at(i, "expected '=' after let declaration");
             ++i;
             int expr_start = i;
             int expr_end = scan_until_statement_end(i, end);
             if (expr_end == expr_start) die_at(i, "expected initializer expression");
-            if ((expr_end == expr_start + 1 && tokens[expr_start].type == TOK_IDENT && strcmp(tokens[expr_start].text, "CPU") == 0) ||
-                (expr_end == expr_start + 3 && tokens[expr_start].type == TOK_IDENT && strcmp(tokens[expr_start].text, "CPU") == 0 &&
-                 tok_is(expr_start + 1, "(") && tok_is(expr_start + 2, ")")))
+
+            /* `let value = Type()` is a zero-initialized C* struct constructor. */
+            if (tokens[expr_start].type == TOK_IDENT &&
+                ((expr_end == expr_start + 1) ||
+                 (expr_end == expr_start + 3 && tok_is(expr_start + 1, "(") && tok_is(expr_start + 2, ")")))) {
+                for (int si = 0; si < 0; ++si) (void)si;
                 s->as.let_stmt.is_cpu_ctor = true;
-            else
+                s->as.let_stmt.ctor_type = xstrdup(tokens[expr_start].text);
+            } else {
                 s->as.let_stmt.expr = parse_expr_range(expr_start, expr_end);
+            }
             append_stmt(&head, &tail, s);
             i = expr_end;
             if (i < end && tok_is(i, ";")) ++i;
@@ -1101,6 +1147,8 @@ static void emit_print(FILE *out, int string_token) {
     else fprintf(out, "    printf(\"%s\\n\");\n", fmt);
 }
 
+static void emit_c_type_tokens(FILE *out, int start, int end);
+
 static void emit_stmt_list(FILE *out, const Stmt *stmt, int indent);
 
 static void emit_indent(FILE *out, int indent) {
@@ -1113,7 +1161,12 @@ static void emit_stmt_list(FILE *out, const Stmt *stmt, int indent) {
             case ST_LET:
                 emit_indent(out, indent);
                 if (s->as.let_stmt.is_cpu_ctor) {
-                    fprintf(out, "CPU %s = {0};\n", s->as.let_stmt.name);
+                    fprintf(out, "%s %s = {0};\n", s->as.let_stmt.ctor_type ? s->as.let_stmt.ctor_type : "CPU", s->as.let_stmt.name);
+                } else if (s->as.let_stmt.has_explicit_type) {
+                    emit_c_type_tokens(out, s->as.let_stmt.type_start, s->as.let_stmt.type_end);
+                    fprintf(out, " %s = ", s->as.let_stmt.name);
+                    emit_expr(out, s->as.let_stmt.expr);
+                    fputs(";\n", out);
                 } else {
                     fprintf(out, "__auto_type %s = ", s->as.let_stmt.name);
                     emit_expr(out, s->as.let_stmt.expr);
@@ -1220,9 +1273,360 @@ static void register_stmt_strings(const Stmt *stmt) {
     }
 }
 
+
+static CType type_unknown(void) {
+    CType t; memset(&t, 0, sizeof(t)); t.kind = TYPE_UNKNOWN; return t;
+}
+
+static CType type_simple(TypeKind kind, int bits, int is_signed, const char *name) {
+    CType t; memset(&t, 0, sizeof(t));
+    t.kind = kind; t.bits = bits; t.is_signed = is_signed;
+    if (name) snprintf(t.name, sizeof(t.name), "%s", name);
+    return t;
+}
+
+static CType type_pointer(CType base) {
+    CType t; memset(&t, 0, sizeof(t));
+    t.kind = TYPE_PTR; t.base = (CType *)xmalloc(sizeof(CType));
+    *t.base = base;
+    return t;
+}
+
+static CType clone_type(CType t) {
+    if (t.kind == TYPE_PTR && t.base) return type_pointer(clone_type(*t.base));
+    return t;
+}
+
+static void free_type(CType *t) {
+    if (!t) return;
+    if (t->kind == TYPE_PTR && t->base) { free_type(t->base); free(t->base); t->base = NULL; }
+}
+
+static bool is_integral_type(const CType *t) {
+    return t && (t->kind == TYPE_INT || t->kind == TYPE_UINT || t->kind == TYPE_BOOL);
+}
+
+static CType parse_type_range(int start, int end, const Program *p) {
+    if (start >= end) return type_unknown();
+    int i = start;
+    int ptr_depth = 0;
+    while (i < end && tok_is(i, "*")) { ++ptr_depth; ++i; }
+    if (i >= end || tokens[i].type != TOK_IDENT) return type_unknown();
+    const char *name = tokens[i].text;
+    ++i;
+    while (i < end && tok_is(i, "*")) { ++ptr_depth; ++i; }
+    CType t = type_unknown();
+    if (strcmp(name, "void") == 0) t = type_simple(TYPE_VOID, 0, 0, name);
+    else if (strcmp(name, "bool") == 0) t = type_simple(TYPE_BOOL, 1, 0, name);
+    else if (strcmp(name, "int") == 0) t = type_simple(TYPE_INT, 32, 1, name);
+    else if (strcmp(name, "u8") == 0) t = type_simple(TYPE_UINT, 8, 0, name);
+    else if (strcmp(name, "u16") == 0) t = type_simple(TYPE_UINT, 16, 0, name);
+    else if (strcmp(name, "u32") == 0) t = type_simple(TYPE_UINT, 32, 0, name);
+    else if (strcmp(name, "u64") == 0) t = type_simple(TYPE_UINT, 64, 0, name);
+    else if (strcmp(name, "i8") == 0) t = type_simple(TYPE_INT, 8, 1, name);
+    else if (strcmp(name, "i16") == 0) t = type_simple(TYPE_INT, 16, 1, name);
+    else if (strcmp(name, "i32") == 0) t = type_simple(TYPE_INT, 32, 1, name);
+    else if (strcmp(name, "i64") == 0) t = type_simple(TYPE_INT, 64, 1, name);
+    else if (strcmp(name, "char") == 0) t = type_simple(TYPE_INT, 8, 1, name);
+    else {
+        for (size_t si = 0; si < p->struct_count; ++si) {
+            if (strcmp(p->structs[si].name, name) == 0) {
+                t = type_simple(TYPE_STRUCT, 0, 0, name);
+                break;
+            }
+        }
+    }
+    if (t.kind == TYPE_UNKNOWN) return t;
+    while (ptr_depth-- > 0) t = type_pointer(t);
+    return t;
+}
+
+static bool types_compatible(const CType *a, const CType *b) {
+    if (!a || !b) return false;
+    if (a->kind == TYPE_UNKNOWN || b->kind == TYPE_UNKNOWN) return true;
+    if (is_integral_type(a) && is_integral_type(b)) return true;
+    if (a->kind == TYPE_STRING && b->kind == TYPE_STRING) return true;
+    if (a->kind == TYPE_STRUCT && b->kind == TYPE_STRUCT) return strcmp(a->name, b->name) == 0;
+    if (a->kind == TYPE_PTR && b->kind == TYPE_PTR) {
+        if (a->base->kind == TYPE_VOID || b->base->kind == TYPE_VOID) return true;
+        return types_compatible(a->base, b->base);
+    }
+    return false;
+}
+
+static const StructDecl *find_struct(const Program *p, const char *name) {
+    for (size_t i = 0; i < p->struct_count; ++i)
+        if (strcmp(p->structs[i].name, name) == 0) return &p->structs[i];
+    return NULL;
+}
+
+static CType find_struct_field_type(const Program *p, const CType *base, const char *member, int token_index_for_error) {
+    const CType *b = base;
+    if (b && b->kind == TYPE_PTR) b = b->base;
+    if (!b || b->kind != TYPE_STRUCT) { die_at(token_index_for_error, "member access requires a struct or struct pointer"); }
+    const StructDecl *sd = find_struct(p, b->name);
+    if (!sd) { die_at(token_index_for_error, "unknown struct type"); }
+    int i = sd->fields_start;
+    while (i < sd->fields_end) {
+        int seg = i;
+        while (i < sd->fields_end && !tok_is(i, ";")) ++i;
+        int stop = i;
+        int colon = -1;
+        for (int k = seg; k < stop; ++k) if (tok_is(k, ":")) { colon = k; break; }
+        if (colon >= 0 && colon == seg + 1) {
+            int name_end = colon;
+            const char *field_name = tokens[seg].text;
+            if (strcmp(field_name, member) == 0) return parse_type_range(colon + 1, stop, p);
+            (void)name_end;
+        } else if (stop - seg >= 2 && tokens[seg + 1].type == TOK_IDENT) {
+            const char *field_name = tokens[seg + 1].text;
+            if (strcmp(field_name, member) == 0) return parse_type_range(seg, seg + 1, p);
+        }
+        if (i < sd->fields_end) ++i;
+    }
+    die_at(token_index_for_error, "unknown struct member");
+    return type_unknown();
+}
+
+typedef struct {
+    LocalSymbol *items;
+    int count;
+} TypeEnv;
+
+static void env_push(TypeEnv *env, const char *name, CType type) {
+    for (int i = 0; i < env->count; ++i) {
+        if (strcmp(env->items[i].name, name) == 0) { env->items[i].type = clone_type(type); return; }
+    }
+    env->items = (LocalSymbol *)xrealloc(env->items, sizeof(LocalSymbol) * (size_t)(env->count + 1));
+    env->items[env->count].name = xstrdup(name);
+    env->items[env->count].type = clone_type(type);
+    ++env->count;
+}
+
+static bool env_get(TypeEnv *env, const char *name, CType *out) {
+    for (int i = env->count - 1; i >= 0; --i) if (strcmp(env->items[i].name, name) == 0) { *out = clone_type(env->items[i].type); return true; }
+    return false;
+}
+
+static void env_free(TypeEnv *env) {
+    for (int i = 0; i < env->count; ++i) { free(env->items[i].name); free_type(&env->items[i].type); }
+    free(env->items); env->items = NULL; env->count = 0;
+}
+
+static CType function_return_type(const Program *p, const char *name) {
+    for (size_t i = 0; i < p->function_count; ++i) {
+        if (strcmp(p->functions[i].name, name) != 0) continue;
+        FunctionDecl *fn = &p->functions[i];
+        if (fn->return_start < fn->return_end) return parse_type_range(fn->return_start, fn->return_end, p);
+        return type_simple(TYPE_INT, 32, 1, "int");
+    }
+    return type_unknown();
+}
+
+static int function_param_count(const FunctionDecl *fn) {
+    int i = fn->params_start, count = 0;
+    while (i < fn->params_end) {
+        while (i < fn->params_end && tok_is(i, ",")) ++i;
+        if (i >= fn->params_end) break;
+        int depth = 0;
+        while (i < fn->params_end) {
+            if (tok_is(i, "(") || tok_is(i, "[")) ++depth;
+            else if (tok_is(i, ")") || tok_is(i, "]")) { if (depth > 0) --depth; }
+            if (depth == 0 && tok_is(i, ",")) break;
+            ++i;
+        }
+        ++count;
+        if (i < fn->params_end) ++i;
+    }
+    return count;
+}
+
+static bool function_param_at(const FunctionDecl *fn, const Program *p, int wanted, char *name_out, size_t name_cap, CType *type_out) {
+    int i = fn->params_start, index = 0;
+    while (i < fn->params_end) {
+        while (i < fn->params_end && tok_is(i, ",")) ++i;
+        if (i >= fn->params_end) break;
+        int begin = i, depth = 0;
+        while (i < fn->params_end) {
+            if (tok_is(i, "(") || tok_is(i, "[")) ++depth;
+            else if (tok_is(i, ")") || tok_is(i, "]")) { if (depth > 0) --depth; }
+            if (depth == 0 && tok_is(i, ",")) break;
+            ++i;
+        }
+        if (index == wanted) {
+            int colon = -1;
+            for (int k = begin; k < i; ++k) if (tok_is(k, ":")) { colon = k; break; }
+            if (colon != begin + 1 || tokens[begin].type != TOK_IDENT) return false;
+            snprintf(name_out, name_cap, "%s", tokens[begin].text);
+            *type_out = parse_type_range(colon + 1, i, p);
+            return true;
+        }
+        ++index;
+        if (i < fn->params_end) ++i;
+    }
+    return false;
+}
+
+static CType check_expr(const Program *p, TypeEnv *env, const Expr *e);
+
+static CType check_expr(const Program *p, TypeEnv *env, const Expr *e) {
+    if (!e) return type_unknown();
+    switch (e->kind) {
+        case EXPR_INT: return type_simple(TYPE_INT, 32, 1, "int");
+        case EXPR_STRING: return type_simple(TYPE_STRING, 0, 0, "string");
+        case EXPR_IDENT: {
+            CType t; if (env_get(env, e->as.ident, &t)) return t;
+            CType ft = function_return_type(p, e->as.ident);
+            if (ft.kind != TYPE_UNKNOWN) return ft;
+            return type_unknown();
+        }
+        case EXPR_UNARY: {
+            CType a = check_expr(p, env, e->as.unary.operand);
+            const char *op = e->as.unary.op;
+            if (strcmp(op, "&") == 0) return type_pointer(a);
+            if (strcmp(op, "*") == 0) {
+                if (a.kind != TYPE_PTR) die_at(-1, "cannot dereference a non-pointer");
+                return clone_type(*a.base);
+            }
+            if (strcmp(op, "!") == 0 || strcmp(op, "~") == 0 || strcmp(op, "+") == 0 || strcmp(op, "-") == 0) {
+                if (!is_integral_type(&a)) die_at(-1, "unary operator requires an integer value");
+                return a;
+            }
+            return type_unknown();
+        }
+        case EXPR_MEMBER: {
+            CType base = check_expr(p, env, e->as.member.base);
+            if (e->as.member.arrow && base.kind != TYPE_PTR) die_at(-1, "'->' requires a pointer");
+            if (!e->as.member.arrow && base.kind == TYPE_PTR) die_at(-1, "'.' requires a struct value; use '->' for pointers");
+            return find_struct_field_type(p, &base, e->as.member.member, -1);
+        }
+        case EXPR_CALL: {
+            if (e->as.call.callee->kind == EXPR_IDENT) {
+                const char *name = e->as.call.callee->as.ident;
+                const FunctionDecl *fn = NULL;
+                for (size_t i = 0; i < p->function_count; ++i) if (strcmp(p->functions[i].name, name) == 0) { fn = &p->functions[i]; break; }
+                if (fn) {
+                    int expected = function_param_count(fn);
+                    if (expected != e->as.call.arg_count) die_at(-1, "function argument count mismatch");
+                    for (int i = 0; i < e->as.call.arg_count; ++i) {
+                        char pn[128]; CType pt = type_unknown();
+                        if (function_param_at(fn, p, i, pn, sizeof(pn), &pt)) {
+                            CType at = check_expr(p, env, e->as.call.args[i]);
+                            if (!types_compatible(&pt, &at)) die_at(-1, "function argument type mismatch");
+                            free_type(&pt); free_type(&at);
+                        }
+                    }
+                    return function_return_type(p, name);
+                }
+            }
+            (void)check_expr(p, env, e->as.call.callee);
+            for (int i = 0; i < e->as.call.arg_count; ++i) { CType t = check_expr(p, env, e->as.call.args[i]); free_type(&t); }
+            return type_unknown();
+        }
+        case EXPR_BINARY: {
+            CType a = check_expr(p, env, e->as.binary.lhs);
+            CType b = check_expr(p, env, e->as.binary.rhs);
+            const char *op = e->as.binary.op;
+            if (strcmp(op, "=") == 0 || strcmp(op, "+=") == 0 || strcmp(op, "-=") == 0 ||
+                strcmp(op, "*=") == 0 || strcmp(op, "/=") == 0 || strcmp(op, "%=") == 0) {
+                if (!types_compatible(&a, &b)) die_at(-1, "assignment type mismatch");
+                if (strcmp(op, "=") != 0 && !is_integral_type(&a)) die_at(-1, "compound assignment requires an integer value");
+                CType r = clone_type(a); free_type(&a); free_type(&b); return r;
+            }
+            if (strcmp(op, "==") == 0 || strcmp(op, "!=") == 0 || strcmp(op, "<") == 0 || strcmp(op, ">") == 0 ||
+                strcmp(op, "<=") == 0 || strcmp(op, ">=") == 0 || strcmp(op, "&&") == 0 || strcmp(op, "||") == 0) {
+                if (!types_compatible(&a, &b) && !(is_integral_type(&a) && is_integral_type(&b))) die_at(-1, "incompatible operands");
+                CType r = type_simple(TYPE_BOOL, 1, 0, "bool"); free_type(&a); free_type(&b); return r;
+            }
+            if (!is_integral_type(&a) || !is_integral_type(&b)) die_at(-1, "arithmetic or bitwise operator requires integers");
+            CType r = (a.kind == TYPE_UINT || b.kind == TYPE_UINT) ? type_simple(TYPE_UINT, a.bits > b.bits ? a.bits : b.bits, 0, "u64") : a;
+            free_type(&a); free_type(&b); return r;
+        }
+    }
+    return type_unknown();
+}
+
+static void check_stmt_list(const Program *p, TypeEnv *env, const Stmt *stmt, CType expected_return);
+
+static void check_stmt_list(const Program *p, TypeEnv *env, const Stmt *stmt, CType expected_return) {
+    for (const Stmt *s = stmt; s; s = s->next) {
+        switch (s->kind) {
+            case ST_LET: {
+                CType t = type_unknown();
+                if (s->as.let_stmt.is_cpu_ctor) {
+                    const char *ctor = s->as.let_stmt.ctor_type ? s->as.let_stmt.ctor_type : "CPU";
+                    t = parse_type_range(s->as.let_stmt.type_start >= 0 ? s->as.let_stmt.type_start : 0,
+                                         s->as.let_stmt.type_start >= 0 ? s->as.let_stmt.type_start : 0, p);
+                    for (size_t si = 0; si < p->struct_count; ++si) if (strcmp(p->structs[si].name, ctor) == 0) { t = type_simple(TYPE_STRUCT, 0, 0, ctor); break; }
+                    if (s->as.let_stmt.has_explicit_type) {
+                        CType declared = parse_type_range(s->as.let_stmt.type_start, s->as.let_stmt.type_end, p);
+                        if (!types_compatible(&declared, &t)) die_at(-1, "constructor type does not match declaration");
+                        free_type(&t); t = clone_type(declared); free_type(&declared);
+                    }
+                } else {
+                    t = check_expr(p, env, s->as.let_stmt.expr);
+                    if (s->as.let_stmt.has_explicit_type) {
+                        CType declared = parse_type_range(s->as.let_stmt.type_start, s->as.let_stmt.type_end, p);
+                        if (declared.kind == TYPE_UNKNOWN) die_at(-1, "unknown type in let declaration");
+                        if (!types_compatible(&declared, &t)) die_at(-1, "initializer type does not match declaration");
+                        free_type(&t); t = clone_type(declared); free_type(&declared);
+                    }
+                }
+                if (t.kind == TYPE_UNKNOWN && !s->as.let_stmt.has_explicit_type) die_at(-1, "cannot infer type of let initializer");
+                env_push(env, s->as.let_stmt.name, t); free_type(&t); break;
+            }
+            case ST_RETURN: {
+                CType t = check_expr(p, env, s->as.raw_stmt.expr);
+                if (!types_compatible(&expected_return, &t)) die_at(-1, "return type does not match function return type");
+                free_type(&t); break;
+            }
+            case ST_EXPR: { CType t = check_expr(p, env, s->as.raw_stmt.expr); free_type(&t); break; }
+            case ST_PRINT: break;
+            case ST_IF: {
+                CType t = check_expr(p, env, s->as.if_stmt.cond);
+                if (!is_integral_type(&t)) die_at(-1, "if condition must be an integer or bool");
+                free_type(&t); check_stmt_list(p, env, s->as.if_stmt.then_body, expected_return); check_stmt_list(p, env, s->as.if_stmt.else_body, expected_return); break;
+            }
+            case ST_WHILE: {
+                CType t = check_expr(p, env, s->as.while_stmt.cond);
+                if (!is_integral_type(&t)) die_at(-1, "while condition must be an integer or bool");
+                free_type(&t); check_stmt_list(p, env, s->as.while_stmt.body, expected_return); break;
+            }
+            case ST_BLOCK: check_stmt_list(p, env, s->as.block_stmt.body, expected_return); break;
+        }
+    }
+}
+
+static void typecheck_program(const Program *p) {
+    for (size_t fi = 0; fi < p->function_count; ++fi) {
+        const FunctionDecl *fn = &p->functions[fi];
+        CType ret = function_return_type(p, fn->name);
+        TypeEnv env = {0};
+        int param_count = function_param_count(fn);
+        for (int pi = 0; pi < param_count; ++pi) {
+            char pn[128]; CType pt = type_unknown();
+            if (function_param_at(fn, p, pi, pn, sizeof(pn), &pt) && pt.kind != TYPE_UNKNOWN) { env_push(&env, pn, pt); free_type(&pt); }
+        }
+        check_stmt_list(p, &env, fn->body, ret);
+        free_type(&ret); env_free(&env);
+    }
+}
+
+static void emit_c_type_tokens(FILE *out, int start, int end) {
+    if (start < 0 || end <= start) { fputs("int", out); return; }
+    bool first = true;
+    for (int i = start; i < end; ++i) {
+        if (tok_is(i, "*")) { fputs(first ? "*" : " *", out); first = false; continue; }
+        if (!first) fputc(' ', out);
+        fputs(tokens[i].text, out); first = false;
+    }
+}
+
 static void emit_program(FILE *out, Program *p) {
-    fputs("#include <stdio.h>\n#include <stdint.h>\n#include <stdlib.h>\n\n", out);
-    fputs("typedef uint64_t u64;\ntypedef uint32_t u32;\ntypedef uint16_t u16;\ntypedef uint8_t u8;\n\n", out);
+    fputs("#include <stdio.h>\n#include <stdint.h>\n#include <stdlib.h>\n#include <stdbool.h>\n\n", out);
+    fputs("typedef uint64_t u64;\ntypedef uint32_t u32;\ntypedef uint16_t u16;\ntypedef uint8_t u8;\n", out);
+    fputs("typedef int64_t i64; typedef int32_t i32; typedef int16_t i16; typedef int8_t i8;\n", out);
+    fputs("\n", out);
 
     /* Includes are intentionally preserved in source order only in a later backend pass. */
     for (size_t s = 0; s < p->struct_count; ++s) {
@@ -1311,6 +1715,7 @@ int main(int argc, char **argv) {
     free(src);
 
     Program program = parse_program();
+    typecheck_program(&program);
 
     FILE *out = fopen("output.c", "w");
     if (!out) {
@@ -1329,6 +1734,6 @@ int main(int argc, char **argv) {
     free_program(&program);
     clear_symbols();
 
-    printf("[C* Compiler v0.6] compiled successfully, output.c generated\n");
+    printf("[C* Compiler v0.7] compiled successfully, output.c generated\n");
     return 0;
 }

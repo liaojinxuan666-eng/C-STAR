@@ -1,0 +1,13 @@
+comptime for (op in 0 to 8) {
+    if (((op * 3 + 1) % 2 == 1) && ((op << 1) < 10) && ((op & 1) == 0)) {
+        int op_{op}(void) { return {op} * 10 + 7; }
+    } else {
+        int op_{op}(void) { return {op} * 100 + 3; }
+    }
+}
+
+fn main() -> int {
+    let result: int = op_0() + op_1() + op_2() + op_3() + op_4() + op_5() + op_6() + op_7();
+    print("comptime ast: {result}");
+    return 0;
+}
