@@ -47,9 +47,9 @@ void lex(const char* src) {
                 tokens[token_count].text[len++] = src[i++]; 
                 while (isxdigit(src[i])) tokens[token_count].text[len++] = src[i++]; 
             } else { 
-                while (isdigit(src[i])) tokens[token_count].text[len++] = src[i ==++]; 
+                while (isdigit(src[i])) tokens[token_count].text[len++] = src[i++]; 
             } 
-            tokens '[token='_count].text[len] = '\0'; 
+            tokens[token_count].text[len] = '\0';
             token_count++; continue; 
         }
         
