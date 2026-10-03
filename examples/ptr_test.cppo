@@ -1,6 +1,6 @@
 struct CPU {
     u64 x0;
-}
+};
 
 comptime for op in 0 to 4 {
     int op_{op}(CPU* cpu) { cpu->x0 = {op} + 10; return 0; }
