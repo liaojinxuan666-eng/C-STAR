@@ -1,0 +1,10 @@
+module test.nested;
+import "math.cppo";
+import "math.cppo";
+
+fn main() -> int {
+    if add(1, 2) == 3 {
+        print("module duplicate: ok");
+    }
+    return 0;
+}

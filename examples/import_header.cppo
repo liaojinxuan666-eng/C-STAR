@@ -1,0 +1,14 @@
+module test.header;
+import <stdint.h>;
+
+extern fn host_u64() -> u64;
+
+fn main() -> int {
+    let x: u64 = host_u64();
+    if x == 1234 {
+        print("header: ok");
+    } else {
+        print("header: bad");
+    }
+    return 0;
+}

@@ -1,0 +1,18 @@
+module test.main;
+import "math.cppo";
+import <stdint.h>;
+
+fn main() -> int {
+    let a: int = add(20, 22);
+    let b: u64 = mul_u64(5, 7);
+    if a == 42 {
+        if b == 35 {
+            print("module: ok {a}");
+        } else {
+            print("module: bad u64");
+        }
+    } else {
+        print("module: bad int");
+    }
+    return 0;
+}

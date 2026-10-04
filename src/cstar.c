@@ -10,9 +10,10 @@
 #define MAX_SYMBOLS 1000
 
 /*
- * C* v0.9
+ * C* v0.11
  *
- * The frontend now parses ordinary runtime expressions into an AST.
+ * The frontend parses runtime expressions into an AST and provides a small,
+ * deterministic module/header import layer before parsing.
  * Comptime conditions are parsed through the same expression AST used by
  * runtime code. The evaluator accepts deterministic integer expressions and
  * feeds their values into compile-time specialization.
@@ -360,6 +361,187 @@ static long long eval_comptime_ast(const Expr *e, const char *loop_var, long lon
 
     die_at(-1, "invalid comptime expression kind");
     return 0;
+}
+
+
+typedef struct {
+    char **done;
+    size_t done_count;
+    char **active;
+    size_t active_count;
+} ImportState;
+
+static bool str_ends_with(const char *s, const char *suffix) {
+    size_t a = strlen(s), b = strlen(suffix);
+    return a >= b && strcmp(s + a - b, suffix) == 0;
+}
+
+static char *read_entire_file(const char *path) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {
+        fprintf(stderr, "C* error: cannot open imported file '%s'\n", path);
+        exit(1);
+    }
+    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); die_at(-1, "cannot seek imported file"); }
+    long size = ftell(fp);
+    if (size < 0) { fclose(fp); die_at(-1, "cannot size imported file"); }
+    rewind(fp);
+    char *buf = (char *)xmalloc((size_t)size + 1);
+    size_t got = fread(buf, 1, (size_t)size, fp);
+    fclose(fp);
+    buf[got] = '\0';
+    return buf;
+}
+
+static char *dir_of_path(const char *path) {
+    const char *slash = strrchr(path, '/');
+    if (!slash) return xstrdup(".");
+    if (slash == path) return xstrdup("/");
+    size_t n = (size_t)(slash - path);
+    char *out = (char *)xmalloc(n + 1);
+    memcpy(out, path, n);
+    out[n] = '\0';
+    return out;
+}
+
+static char *join_path(const char *dir, const char *name) {
+    size_t a = strlen(dir), b = strlen(name);
+    bool sep = a > 0 && dir[a - 1] != '/';
+    char *out = (char *)xmalloc(a + (sep ? 1 : 0) + b + 1);
+    memcpy(out, dir, a);
+    size_t p = a;
+    if (sep) out[p++] = '/';
+    memcpy(out + p, name, b);
+    out[p + b] = '\0';
+    return out;
+}
+
+static bool import_list_has(char **list, size_t count, const char *path) {
+    for (size_t i = 0; i < count; ++i)
+        if (strcmp(list[i], path) == 0) return true;
+    return false;
+}
+
+static void import_list_add(char ***list, size_t *count, const char *path) {
+    *list = (char **)xrealloc(*list, sizeof(char *) * (*count + 1));
+    (*list)[*count] = xstrdup(path);
+    ++*count;
+}
+
+static void import_state_pop_active(ImportState *st, const char *path) {
+    for (size_t i = 0; i < st->active_count; ++i) {
+        if (strcmp(st->active[i], path) == 0) {
+            free(st->active[i]);
+            for (size_t j = i + 1; j < st->active_count; ++j)
+                st->active[j - 1] = st->active[j];
+            --st->active_count;
+            return;
+        }
+    }
+}
+
+static void import_state_free(ImportState *st) {
+    for (size_t i = 0; i < st->done_count; ++i) free(st->done[i]);
+    for (size_t i = 0; i < st->active_count; ++i) free(st->active[i]);
+    free(st->done);
+    free(st->active);
+    memset(st, 0, sizeof(*st));
+}
+
+static char *expand_imports_recursive(const char *source, const char *current_file, ImportState *st, int depth) {
+    if (depth > 64) die_at(-1, "import nesting too deep");
+
+    size_t cap = strlen(source) + 1;
+    char *out = (char *)xmalloc(cap);
+    size_t used = 0;
+    out[0] = '\0';
+
+    const char *line = source;
+    while (*line) {
+        const char *nl = strchr(line, '\n');
+        size_t len = nl ? (size_t)(nl - line) : strlen(line);
+        const char *q = line;
+        while ((size_t)(q - line) < len && (*q == ' ' || *q == '\t' || *q == '\r')) ++q;
+
+        bool handled = false;
+        if ((size_t)(q - line) + 6 < len && strncmp(q, "import", 6) == 0 &&
+            (q[6] == ' ' || q[6] == '\t')) {
+            const char *arg = q + 6;
+            while ((size_t)(arg - line) < len && (*arg == ' ' || *arg == '\t')) ++arg;
+            char name[1024];
+            size_t nn = 0;
+            bool angle = false, quoted = false;
+            if ((size_t)(arg - line) < len && *arg == '<') {
+                angle = true;
+                ++arg;
+                while ((size_t)(arg - line) < len && *arg != '>' && nn + 1 < sizeof(name)) name[nn++] = *arg++;
+                if ((size_t)(arg - line) >= len || *arg != '>') die_at(-1, "unterminated import header");
+            } else if ((size_t)(arg - line) < len && *arg == '"') {
+                quoted = true;
+                ++arg;
+                while ((size_t)(arg - line) < len && *arg != '"' && nn + 1 < sizeof(name)) name[nn++] = *arg++;
+                if ((size_t)(arg - line) >= len || *arg != '"') die_at(-1, "unterminated import path");
+            }
+            if (angle || quoted) {
+                name[nn] = '\0';
+                const char *tail = arg + 1;
+                while ((size_t)(tail - line) < len && (*tail == ' ' || *tail == '\t' || *tail == '\r')) ++tail;
+                if ((size_t)(tail - line) < len && *tail == ';') {
+                    handled = true;
+                    if (angle || !str_ends_with(name, ".cppo")) {
+                        size_t need = strlen("include ") + nn + 8;
+                        char *piece = (char *)xmalloc(need);
+                        if (angle) snprintf(piece, need, "include <%s>\n", name);
+                        else snprintf(piece, need, "include \"%s\"\n", name);
+                        size_t pl = strlen(piece);
+                        if (used + pl + 1 > cap) {
+                            while (used + pl + 1 > cap) cap *= 2;
+                            out = (char *)xrealloc(out, cap);
+                        }
+                        memcpy(out + used, piece, pl); used += pl; out[used] = '\0';
+                        free(piece);
+                    } else {
+                        char *dir = dir_of_path(current_file);
+                        char *joined = join_path(dir, name);
+                        free(dir);
+                        if (import_list_has(st->active, st->active_count, joined)) {
+                            free(joined);
+                            die_at(-1, "cyclic C* import");
+                        }
+                        if (!import_list_has(st->done, st->done_count, joined)) {
+                            char *child = read_entire_file(joined);
+                            import_list_add(&st->active, &st->active_count, joined);
+                            char *expanded = expand_imports_recursive(child, joined, st, depth + 1);
+                            free(child);
+                            import_state_pop_active(st, joined);
+                            import_list_add(&st->done, &st->done_count, joined);
+                            size_t el = strlen(expanded);
+                            if (used + el + 1 > cap) {
+                                while (used + el + 1 > cap) cap *= 2;
+                                out = (char *)xrealloc(out, cap);
+                            }
+                            memcpy(out + used, expanded, el); used += el; out[used] = '\0';
+                            free(expanded);
+                        }
+                        free(joined);
+                    }
+                }
+            }
+        }
+
+        if (!handled) {
+            if (used + len + 2 > cap) {
+                while (used + len + 2 > cap) cap *= 2;
+                out = (char *)xrealloc(out, cap);
+            }
+            memcpy(out + used, line, len); used += len;
+            out[used++] = '\n'; out[used] = '\0';
+        }
+
+        line = nl ? nl + 1 : line + len;
+        if (!nl) break;
+    }
+    return out;
 }
 
 static void lex(const char *src) {
@@ -775,10 +957,27 @@ static Stmt *parse_statements(int start, int end) {
             int expr_end = scan_until_statement_end(i, end);
             if (expr_end == expr_start) die_at(i, "expected initializer expression");
 
-            /* `let value = Type()` is a zero-initialized C* struct constructor. */
-            if (tokens[expr_start].type == TOK_IDENT &&
-                expr_end == expr_start + 3 &&
-                tok_is(expr_start + 1, "(") && tok_is(expr_start + 2, ")")) {
+            /* `let value: Type = Type()` is a zero-initialized C* struct constructor.
+             * Keep ordinary zero-argument function calls as expressions.
+             * The legacy `let cpu = CPU()` form remains supported for names that
+             * look like type names (leading uppercase).
+             */
+            bool ctor_candidate = tokens[expr_start].type == TOK_IDENT &&
+                                  expr_end == expr_start + 3 &&
+                                  tok_is(expr_start + 1, "(") && tok_is(expr_start + 2, ")");
+            bool ctor_match = false;
+            if (ctor_candidate) {
+                if (s->as.let_stmt.has_explicit_type &&
+                    s->as.let_stmt.type_start < s->as.let_stmt.type_end &&
+                    tokens[s->as.let_stmt.type_start].type == TOK_IDENT &&
+                    strcmp(tokens[s->as.let_stmt.type_start].text, tokens[expr_start].text) == 0) {
+                    ctor_match = true;
+                } else if (!s->as.let_stmt.has_explicit_type &&
+                           isupper((unsigned char)tokens[expr_start].text[0])) {
+                    ctor_match = true;
+                }
+            }
+            if (ctor_match) {
                 s->as.let_stmt.is_cpu_ctor = true;
                 s->as.let_stmt.ctor_type = xstrdup(tokens[expr_start].text);
             } else {
@@ -932,6 +1131,24 @@ static Program parse_program(void) {
                 while (i < token_count && !tok_is(i, ">")) ++i;
                 if (i < token_count) ++i;
             } else if (i < token_count && tokens[i].type == TOK_STRING) ++i;
+            continue;
+        }
+
+        if (tok_is(i, "module")) {
+            ++i;
+            if (i >= token_count || tokens[i].type != TOK_IDENT) die_at(i, "expected module name");
+            ++i;
+            while (i < token_count && (tok_is(i, ".") || tokens[i].type == TOK_IDENT)) {
+                if (tok_is(i, ".")) {
+                    ++i;
+                    if (i >= token_count || tokens[i].type != TOK_IDENT) die_at(i, "expected identifier after module '.'");
+                } else {
+                    ++i;
+                }
+                if (i < token_count && tok_is(i, ";")) break;
+            }
+            if (!tok_is(i, ";")) die_at(i, "expected ';' after module declaration");
+            ++i;
             continue;
         }
 
@@ -2106,7 +2323,7 @@ static void emit_includes_directly(FILE *out) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "C* Compiler v0.10\nUsage: %s <file.cppo>\n", argv[0]);
+        fprintf(stderr, "C* Compiler v0.11\nUsage: %s <file.cppo>\n", argv[0]);
         return 1;
     }
 
@@ -2131,8 +2348,17 @@ int main(int argc, char **argv) {
     fclose(fp);
     src[got] = '\0';
 
-    lex(src);
+    ImportState imports;
+    memset(&imports, 0, sizeof(imports));
+    import_list_add(&imports.active, &imports.active_count, argv[1]);
+    char *expanded_src = expand_imports_recursive(src, argv[1], &imports, 0);
+    import_state_pop_active(&imports, argv[1]);
+    import_list_add(&imports.done, &imports.done_count, argv[1]);
     free(src);
+
+    lex(expanded_src);
+    free(expanded_src);
+    import_state_free(&imports);
 
     Program program = parse_program();
     typecheck_program(&program);
@@ -2154,6 +2380,6 @@ int main(int argc, char **argv) {
     free_program(&program);
     clear_symbols();
 
-    printf("[C* Compiler v0.10] compiled successfully, output.c generated\n");
+    printf("[C* Compiler v0.11] compiled successfully, output.c generated\n");
     return 0;
 }
