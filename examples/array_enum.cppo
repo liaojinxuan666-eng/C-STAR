@@ -1,0 +1,34 @@
+enum Mode {
+    MODE_IDLE,
+    MODE_RUN = 4,
+    MODE_PAUSE
+};
+
+struct Buffer {
+    int values[4];
+};
+
+fn main() -> int {
+    let mode: Mode = MODE_RUN;
+    let a: int[4] = 0;
+    a[0] = 3;
+    a[1] = 7;
+    a[2] = a[0] + a[1];
+
+    let p: int* = &a[2];
+    *p += 5;
+
+    let b: Buffer = Buffer();
+    b.values[0] = a[2];
+
+    if mode == MODE_RUN {
+        if b.values[0] == 15 {
+            print("array enum: ok {b.values[0]}");
+        } else {
+            print("array enum: bad value");
+        }
+    } else {
+        print("array enum: bad enum");
+    }
+    return 0;
+}
