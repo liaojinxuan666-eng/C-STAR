@@ -10,7 +10,7 @@
 #define MAX_SYMBOLS 1000
 
 /*
- * C* v0.11
+ * C* v0.12
  *
  * The frontend parses runtime expressions into an AST and provides a small,
  * deterministic module/header import layer before parsing.
@@ -163,6 +163,11 @@ typedef struct {
 } ComptimeDecl;
 
 typedef struct {
+    char *path;
+} LinkDecl;
+
+typedef struct {
+    char *module_name;
     StructDecl *structs;
     size_t struct_count;
     EnumDecl *enums;
@@ -171,6 +176,8 @@ typedef struct {
     size_t function_count;
     ComptimeDecl *comptimes;
     size_t comptime_count;
+    LinkDecl *links;
+    size_t link_count;
 } Program;
 
 typedef enum {
@@ -488,7 +495,7 @@ static char *expand_imports_recursive(const char *source, const char *current_fi
                 while ((size_t)(tail - line) < len && (*tail == ' ' || *tail == '\t' || *tail == '\r')) ++tail;
                 if ((size_t)(tail - line) < len && *tail == ';') {
                     handled = true;
-                    if (angle || !str_ends_with(name, ".cppo")) {
+                    if (angle || (!str_ends_with(name, ".cppo") && !str_ends_with(name, ".hppo") && !str_ends_with(name, ".cso"))) {
                         size_t need = strlen("include ") + nn + 8;
                         char *piece = (char *)xmalloc(need);
                         if (angle) snprintf(piece, need, "include <%s>\n", name);
@@ -500,6 +507,21 @@ static char *expand_imports_recursive(const char *source, const char *current_fi
                         }
                         memcpy(out + used, piece, pl); used += pl; out[used] = '\0';
                         free(piece);
+                    } else if (str_ends_with(name, ".cso")) {
+                        char *dir = dir_of_path(current_file);
+                        char *joined = join_path(dir, name);
+                        free(dir);
+                        size_t need = strlen(joined) + 16;
+                        char *piece = (char *)xmalloc(need);
+                        snprintf(piece, need, "link \"%s\";\n", joined);
+                        size_t pl = strlen(piece);
+                        if (used + pl + 1 > cap) {
+                            while (used + pl + 1 > cap) cap *= 2;
+                            out = (char *)xrealloc(out, cap);
+                        }
+                        memcpy(out + used, piece, pl); used += pl; out[used] = '\0';
+                        free(piece);
+                        free(joined);
                     } else {
                         char *dir = dir_of_path(current_file);
                         char *joined = join_path(dir, name);
@@ -1119,6 +1141,14 @@ static void program_add_comptime(Program *p, ComptimeDecl d) {
     p->comptimes[p->comptime_count++] = d;
 }
 
+static void program_add_link(Program *p, const char *path) {
+    for (size_t i = 0; i < p->link_count; ++i) {
+        if (strcmp(p->links[i].path, path) == 0) return;
+    }
+    p->links = (LinkDecl *)xrealloc(p->links, sizeof(*p->links) * (p->link_count + 1));
+    p->links[p->link_count++].path = xstrdup(path);
+}
+
 static Program parse_program(void) {
     Program p;
     memset(&p, 0, sizeof(p));
@@ -1137,6 +1167,7 @@ static Program parse_program(void) {
         if (tok_is(i, "module")) {
             ++i;
             if (i >= token_count || tokens[i].type != TOK_IDENT) die_at(i, "expected module name");
+            if (!p.module_name) p.module_name = xstrdup(tokens[i].text);
             ++i;
             while (i < token_count && (tok_is(i, ".") || tokens[i].type == TOK_IDENT)) {
                 if (tok_is(i, ".")) {
@@ -1214,6 +1245,23 @@ static Program parse_program(void) {
             continue;
         }
 
+        if (tok_is(i, "link")) {
+            ++i;
+            if (i >= token_count || tokens[i].type != TOK_STRING) die_at(i, "expected string path after link");
+            const char *q = tokens[i].text;
+            size_t n = strlen(q);
+            if (n < 2) die_at(i, "invalid link path");
+            char *path = (char *)xmalloc(n - 1);
+            memcpy(path, q + 1, n - 2);
+            path[n - 2] = '\0';
+            program_add_link(&p, path);
+            free(path);
+            ++i;
+            if (tok_is(i, ";")) ++i;
+            else die_at(i, "expected ';' after link");
+            continue;
+        }
+
         if (tok_is(i, "extern") && tok_is(i + 1, "fn")) {
             i += 1;
         }
@@ -1273,6 +1321,7 @@ static Program parse_program(void) {
 }
 
 static void free_program(Program *p) {
+    free(p->module_name);
     for (size_t i = 0; i < p->struct_count; ++i) free(p->structs[i].name);
     for (size_t i = 0; i < p->enum_count; ++i) free(p->enums[i].name);
     for (size_t i = 0; i < p->function_count; ++i) {
@@ -1284,6 +1333,8 @@ static void free_program(Program *p) {
     free(p->enums);
     free(p->functions);
     free(p->comptimes);
+    for (size_t i = 0; i < p->link_count; ++i) free(p->links[i].path);
+    free(p->links);
     memset(p, 0, sizeof(*p));
 }
 
@@ -2302,6 +2353,98 @@ static void emit_program(FILE *out, Program *p) {
     }
 }
 
+static char *path_replace_ext(const char *path, const char *ext) {
+    size_t n = strlen(path);
+    size_t cut = n;
+    if (n >= 5 && (strcmp(path + n - 5, ".cppo") == 0 || strcmp(path + n - 5, ".hppo") == 0)) cut = n - 5;
+    char *out = (char *)xmalloc(cut + strlen(ext) + 1);
+    memcpy(out, path, cut);
+    strcpy(out + cut, ext);
+    return out;
+}
+
+static char *path_stem(const char *path) {
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    size_t n = strlen(base);
+    if (n >= 5 && (strcmp(base + n - 5, ".cppo") == 0 || strcmp(base + n - 5, ".hppo") == 0)) n -= 5;
+    char *out = (char *)xmalloc(n + 1);
+    memcpy(out, base, n);
+    out[n] = '\0';
+    return out;
+}
+
+static void emit_hppo_params(FILE *out, int start, int end) {
+    fputc('(', out);
+    bool first = true;
+    int i = start;
+    while (i < end) {
+        int begin = i;
+        int depth = 0;
+        while (i < end) {
+            if (tok_is(i, "(")) ++depth;
+            else if (tok_is(i, ")") && depth > 0) --depth;
+            if (depth == 0 && tok_is(i, ",")) break;
+            ++i;
+        }
+        if (!first) fputs(", ", out);
+        first = false;
+        for (int k = begin; k < i; ++k) {
+            if (k > begin && !tok_is(k, "[") && !tok_is(k, "]") && !tok_is(k, "*") && !tok_is(k, "->")) fputc(' ', out);
+            fputs(tokens[k].text, out);
+        }
+        if (i < end && tok_is(i, ",")) ++i;
+    }
+    fputc(')', out);
+}
+
+static void emit_hppo_file(const char *path, const Program *p) {
+    FILE *h = fopen(path, "w");
+    if (!h) { fprintf(stderr, "C* error: cannot write '%s'\n", path); exit(1); }
+    if (p->module_name) fprintf(h, "module %s;\n\n", p->module_name);
+    for (size_t e = 0; e < p->enum_count; ++e) {
+        const EnumDecl *d = &p->enums[e];
+        fprintf(h, "enum %s {\n", d->name);
+        for (int i = d->members_start; i < d->members_end; ++i) { emit_token(h, i); if (tok_is(i, ",")) fputc('\n', h); }
+        fputs("};\n\n", h);
+    }
+    for (size_t s = 0; s < p->struct_count; ++s) {
+        const StructDecl *d = &p->structs[s];
+        fprintf(h, "struct %s {\n", d->name);
+        for (int i = d->fields_start; i < d->fields_end; ++i) { if (tok_is(i, ";")) fputs(";\n", h); else emit_token(h, i); }
+        fputs("};\n\n", h);
+    }
+    for (size_t f = 0; f < p->function_count; ++f) {
+        const FunctionDecl *fn = &p->functions[f];
+        if (fn->is_extern || strcmp(fn->name, "main") == 0) continue;
+        fputs("extern fn ", h);
+        fputs(fn->name, h);
+        if (fn->params_start >= fn->params_end) fputs("()", h);
+        else emit_hppo_params(h, fn->params_start, fn->params_end);
+        if (fn->return_start < fn->return_end) {
+            fputs(" -> ", h);
+            for (int k = fn->return_start; k < fn->return_end; ++k) { fputs(tokens[k].text, h); if (k + 1 < fn->return_end) fputc(' ', h); }
+        }
+        fputs(";\n", h);
+    }
+    fclose(h);
+}
+
+
+static int run_clang_object(const char *input_c, const char *output_obj) {
+    size_t cap = strlen(input_c) * 4 + strlen(output_obj) * 4 + 128;
+    char *cmd = (char *)xmalloc(cap);
+    /* Paths used here are quoted for a POSIX shell. */
+    char *qin = (char *)xmalloc(strlen(input_c) * 4 + 8);
+    char *qout = (char *)xmalloc(strlen(output_obj) * 4 + 8);
+    size_t a = 0; qin[a++] = '\''; for (const char *p = input_c; *p; ++p) { if (*p == '\'') { memcpy(qin + a, "'\\''", 4); a += 4; } else qin[a++] = *p; } qin[a++] = '\''; qin[a] = '\0';
+    a = 0; qout[a++] = '\''; for (const char *p = output_obj; *p; ++p) { if (*p == '\'') { memcpy(qout + a, "'\\''", 4); a += 4; } else qout[a++] = *p; } qout[a++] = '\''; qout[a] = '\0';
+    snprintf(cmd, cap, "clang -std=c11 -O3 -c %s -o %s", qin, qout);
+    int rc = system(cmd);
+    free(cmd); free(qin); free(qout);
+    return rc;
+}
+
 static void emit_includes_directly(FILE *out) {
     /* Keep explicit C includes from the C* source. */
     for (int i = 0; i < token_count; ++i) {
@@ -2322,12 +2465,26 @@ static void emit_includes_directly(FILE *out) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 2) {
-        fprintf(stderr, "C* Compiler v0.11\nUsage: %s <file.cppo>\n", argv[0]);
-        return 1;
+    bool emit_module_mode = false;
+    const char *input_path = NULL;
+    const char *object_path_arg = NULL;
+    if (argc >= 2 && strcmp(argv[1], "--emit-module") == 0) {
+        emit_module_mode = true;
+        if (argc < 3) {
+            fprintf(stderr, "C* Compiler v0.12\nUsage: %s <file.cppo> | %s --emit-module <file.cppo> [output.cso]\n", argv[0], argv[0]);
+            return 1;
+        }
+        input_path = argv[2];
+        if (argc >= 4) object_path_arg = argv[3];
+    } else {
+        if (argc < 2) {
+            fprintf(stderr, "C* Compiler v0.12\nUsage: %s <file.cppo> | %s --emit-module <file.cppo> [output.cso]\n", argv[0], argv[0]);
+            return 1;
+        }
+        input_path = argv[1];
     }
 
-    FILE *fp = fopen(argv[1], "rb");
+    FILE *fp = fopen(input_path, "rb");
     if (!fp) {
         perror("C*");
         return 1;
@@ -2350,10 +2507,10 @@ int main(int argc, char **argv) {
 
     ImportState imports;
     memset(&imports, 0, sizeof(imports));
-    import_list_add(&imports.active, &imports.active_count, argv[1]);
-    char *expanded_src = expand_imports_recursive(src, argv[1], &imports, 0);
-    import_state_pop_active(&imports, argv[1]);
-    import_list_add(&imports.done, &imports.done_count, argv[1]);
+    import_list_add(&imports.active, &imports.active_count, input_path);
+    char *expanded_src = expand_imports_recursive(src, input_path, &imports, 0);
+    import_state_pop_active(&imports, input_path);
+    import_list_add(&imports.done, &imports.done_count, input_path);
     free(src);
 
     lex(expanded_src);
@@ -2377,9 +2534,34 @@ int main(int argc, char **argv) {
     }
     fclose(out);
 
+    if (emit_module_mode) {
+        char *stem = path_stem(input_path);
+        char *default_hppo = path_replace_ext(input_path, ".hppo");
+        char *default_cso = path_replace_ext(input_path, ".cso");
+        const char *hppo_path = default_hppo;
+        const char *cso_path = object_path_arg ? object_path_arg : default_cso;
+        emit_hppo_file(hppo_path, &program);
+        if (run_clang_object("output.c", cso_path) != 0) {
+            fprintf(stderr, "C* error: clang failed while creating '%s'\n", cso_path);
+            free(stem);
+            free_program(&program);
+            clear_symbols();
+            return 1;
+        }
+        printf("[C* Compiler v0.12] module built: %s + %s\n", hppo_path, cso_path);
+        free(default_hppo);
+        free(default_cso);
+        free(stem);
+    } else {
+        printf("[C* Compiler v0.12] compiled successfully, output.c generated\n");
+        if (program.link_count) {
+            printf("C* module links:");
+            for (size_t i = 0; i < program.link_count; ++i) printf(" %s", program.links[i].path);
+            putchar('\n');
+        }
+    }
+
     free_program(&program);
     clear_symbols();
-
-    printf("[C* Compiler v0.11] compiled successfully, output.c generated\n");
     return 0;
 }

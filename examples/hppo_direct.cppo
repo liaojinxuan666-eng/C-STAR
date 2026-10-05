@@ -1,0 +1,8 @@
+module direct;
+import "math.hppo";
+
+fn main() -> int {
+    let v: int = add(2, 3);
+    print("hppo: ok");
+    return v;
+}

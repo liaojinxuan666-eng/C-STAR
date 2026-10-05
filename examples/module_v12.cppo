@@ -1,0 +1,19 @@
+module app;
+
+import "math.hppo";
+import "math.cso";
+
+fn main() -> int {
+    let x: int = add(20, 22);
+    let y: u64 = mul64(7, 5);
+    if x == 42 {
+        if y == 35 {
+            print("module v12: ok");
+        } else {
+            print("module v12: bad u64");
+        }
+    } else {
+        print("module v12: bad int");
+    }
+    return 0;
+}

@@ -1,9 +1,9 @@
-module test.math;
+module math;
 
 fn add(a: int, b: int) -> int {
     return a + b;
 }
 
-fn mul_u64(a: u64, b: u64) -> u64 {
+fn mul64(a: u64, b: u64) -> u64 {
     return a * b;
 }

@@ -1,43 +1,43 @@
-# C* v0.11 — Module + Native Header Interop
+# C* v0.12 — Header / Object Modules
 
-C* continues to follow the same goals: extreme performance, excellent compatibility, and extreme simplicity.
+C* continues to target: 极致的性能，优秀的兼容，极致的简易。
 
-## Added
+## New
 
-- `module name;` top-level module declaration
-- `import "other.cppo";` for source-level C* modules
-- `import <header.h>;` for native C headers
-- quoted non-`.cppo` imports become C header includes
-- nested C* imports
-- duplicate C* imports are ignored
-- cyclic C* imports are rejected
-- imported files are resolved relative to the importing `.cppo`
-- existing `include <...>` syntax remains supported
-- ordinary zero-argument function calls in `let` initializers are no longer mistaken for struct constructors
+- `.hppo` — C* module interface/header. The compiler can import it and type-check its declarations.
+- `.cso` — native compiled object produced by `cstar --emit-module` via `clang -O3 -c`.
+- `import "foo.hppo";` — imports the C* interface.
+- `import "foo.cso";` — records the native object for final linking.
+- `link "foo.cso";` — explicit object-link directive.
+- `--emit-module` — emits `<module>.hppo` and `<module>.cso` next to the source by default.
+- Repeated imports are deduplicated; cyclic `.cppo`/`.hppo` imports remain rejected.
 
-## Example
+## Build a module
 
-```cppo
-module emulator.cpu;
-import "alu.cppo";
-import <stdint.h>;
-
-fn main() -> int {
-    let x: int = add(20, 22);
-    return x;
-}
+```sh
+clang -std=c11 -Wall -Wextra -Wpedantic cstar.c -o cstar
+./cstar --emit-module tests/math.cppo
 ```
 
-The compiler flattens C* module imports into one compilation unit, then sends the normal C backend output to Clang.
+This creates:
 
-## Tests
+```text
+tests/math.hppo
+tests/math.cso
+```
 
-New tests:
+## Consume a module
 
-- `tests/module_main.cppo`
-- `tests/module_nested.cppo`
-- `tests/import_header.cppo`
-- `tests/math.cppo`
-- `tests/import_host.c`
+```sh
+./cstar tests/module_v12.cppo
+clang -std=c11 -Wall -Wextra -Wpedantic -O3 output.c tests/math.cso -o module-test
+./module-test
+```
 
-All v0.10 and earlier regression tests were also rerun successfully with `-Wall -Wextra -Wpedantic` on the compiler and generated C.
+Expected output:
+
+```text
+module v12: ok
+```
+
+`.cso` is a real native relocatable object for the current host/target clang toolchain, while `.hppo` carries the C* interface used during source compilation.

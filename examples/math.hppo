@@ -1,0 +1,4 @@
+module math;
+
+extern fn add(a : int, b : int) -> int;
+extern fn mul64(a : u64, b : u64) -> u64;
