@@ -1,0 +1,33 @@
+module alias;
+
+type Word = u64;
+type WordPtr = *Word;
+
+struct Pair {
+    a: int;
+    b: int;
+};
+
+type PairPtr = *Pair;
+
+extern fn host_sum(p: PairPtr) -> int;
+extern fn host_inc(v: Word) -> Word;
+
+fn main() -> int {
+    let pair: Pair = Pair();
+    pair.a = 20;
+    pair.b = 22;
+    let p: PairPtr = &pair;
+    let x: int = host_sum(p);
+    let w: Word = host_inc(41);
+    if x == 42 {
+        if w == 42 {
+            print("type alias: ok 42");
+        } else {
+            print("type alias: bad word");
+        }
+    } else {
+        print("type alias: bad ptr");
+    }
+    return 0;
+}

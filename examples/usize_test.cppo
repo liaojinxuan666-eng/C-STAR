@@ -1,0 +1,10 @@
+fn main() -> int {
+    let n: usize = 7;
+    let m: isize = -2;
+    if n == 7 {
+        if m < 0 {
+            print("usize: ok");
+        }
+    }
+    return 0;
+}

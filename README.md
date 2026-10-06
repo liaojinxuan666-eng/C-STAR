@@ -1,22 +1,21 @@
-# C* v0.12 iOS fix
+# C* v0.13 — Type Aliases + Stronger Native C ABI
 
-The original v0.12 used `system()` to invoke clang while creating `.cso` objects.
-Apple marks `system()` unavailable on iOS, so the compiler itself could not be built with the iPhoneOS SDK.
+Core principles remain:
 
-This revision replaces `system()` with `posix_spawnp()` + `waitpid()`.
-It launches `clang` directly, preserves the inherited environment/PATH, and avoids shell quoting.
+- 极致的性能
+- 优秀的兼容
+- 极致的简易
 
-Build on iOS/jailbroken iPhone:
+## v0.13
 
-```sh
-cd /var/mobile/Documents/cstar-test
-clang -std=c11 -Wall -Wextra -Wpedantic src/cstar.c -o cstar
-./cstar tests/module_v12.cppo
-```
+- `type Name = Type;` type aliases
+- pointer aliases such as `type WordPtr = *Word`
+- aliases participate in type checking
+- C backend emits native `typedef`
+- function parameters/returns are lowered from the parsed C* type instead of token order
+- pointer parameters and pointer returns now lower to valid C declarators
+- `usize` / `isize` map to native `size_t` / `ptrdiff_t`
+- extern C functions use stricter ABI argument compatibility checks
+- iOS compiler path remains free of `system()`; module object generation uses `posix_spawnp`
 
-Expected:
-
-```text
-[C* Compiler v0.12] compiled successfully, output.c generated
-C* module links: tests/math.cso
-```
+The public syntax stays intentionally small.

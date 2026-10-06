@@ -4,6 +4,7 @@
 #include <ctype.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <spawn.h>
 #include <sys/wait.h>
 #include <errno.h>
@@ -13,7 +14,7 @@
 #define MAX_SYMBOLS 1000
 
 /*
- * C* v0.12
+ * C* v0.13
  *
  * The frontend parses runtime expressions into an AST and provides a small,
  * deterministic module/header import layer before parsing.
@@ -170,11 +171,19 @@ typedef struct {
 } LinkDecl;
 
 typedef struct {
+    char *name;
+    int type_start;
+    int type_end;
+} TypeAliasDecl;
+
+typedef struct {
     char *module_name;
     StructDecl *structs;
     size_t struct_count;
     EnumDecl *enums;
     size_t enum_count;
+    TypeAliasDecl *aliases;
+    size_t alias_count;
     FunctionDecl *functions;
     size_t function_count;
     ComptimeDecl *comptimes;
@@ -1134,6 +1143,14 @@ static void program_add_enum(Program *p, EnumDecl d) {
     p->enums[p->enum_count++] = d;
 }
 
+static void program_add_alias(Program *p, TypeAliasDecl d) {
+    for (size_t i = 0; i < p->alias_count; ++i) {
+        if (strcmp(p->aliases[i].name, d.name) == 0) die_at(-1, "duplicate type alias");
+    }
+    p->aliases = (TypeAliasDecl *)xrealloc(p->aliases, sizeof(*p->aliases) * (p->alias_count + 1));
+    p->aliases[p->alias_count++] = d;
+}
+
 static void program_add_function(Program *p, FunctionDecl d) {
     p->functions = (FunctionDecl *)xrealloc(p->functions, sizeof(*p->functions) * (p->function_count + 1));
     p->functions[p->function_count++] = d;
@@ -1183,6 +1200,28 @@ static Program parse_program(void) {
             }
             if (!tok_is(i, ";")) die_at(i, "expected ';' after module declaration");
             ++i;
+            continue;
+        }
+
+        if (tok_is(i, "type")) {
+            if (i + 3 >= token_count || tokens[i + 1].type != TOK_IDENT || !tok_is(i + 2, "="))
+                die_at(i, "expected 'type Name = Type'");
+            TypeAliasDecl d;
+            d.name = xstrdup(tokens[i + 1].text);
+            d.type_start = i + 3;
+            int j = d.type_start;
+            int bracket_depth = 0;
+            while (j < token_count) {
+                if (tok_is(j, "[")) ++bracket_depth;
+                else if (tok_is(j, "]") && bracket_depth > 0) --bracket_depth;
+                if (bracket_depth == 0 && tok_is(j, ";")) break;
+                if (bracket_depth == 0 && tok_is(j, "fn")) die_at(j, "expected type before ';'");
+                ++j;
+            }
+            if (!tok_is(j, ";") || j == d.type_start) die_at(j, "expected ';' after type alias");
+            d.type_end = j;
+            program_add_alias(&p, d);
+            i = j + 1;
             continue;
         }
 
@@ -1327,6 +1366,7 @@ static void free_program(Program *p) {
     free(p->module_name);
     for (size_t i = 0; i < p->struct_count; ++i) free(p->structs[i].name);
     for (size_t i = 0; i < p->enum_count; ++i) free(p->enums[i].name);
+    for (size_t i = 0; i < p->alias_count; ++i) free(p->aliases[i].name);
     for (size_t i = 0; i < p->function_count; ++i) {
         free(p->functions[i].name);
         free_stmt_list(p->functions[i].body);
@@ -1334,6 +1374,7 @@ static void free_program(Program *p) {
     for (size_t i = 0; i < p->comptime_count; ++i) free(p->comptimes[i].loop_var);
     free(p->structs);
     free(p->enums);
+    free(p->aliases);
     free(p->functions);
     free(p->comptimes);
     for (size_t i = 0; i < p->link_count; ++i) free(p->links[i].path);
@@ -1709,33 +1750,35 @@ static void emit_stmt_list(FILE *out, const Stmt *stmt, int indent) {
     }
 }
 
-static void emit_function_params(FILE *out, int start, int end) {
+static CType parse_type_range(int start, int end, const Program *p);
+
+static void emit_function_params_typed(FILE *out, const Program *p, int start, int end) {
     fputs("(", out);
+    if (start >= end || (end == start + 1 && tok_is(start, "void"))) {
+        fputs("void", out);
+        fputs(")", out);
+        return;
+    }
     bool first = true;
     int i = start;
     while (i < end) {
-        int begin = i;
-        int paren_depth = 0;
+        int begin = i, depth = 0;
         while (i < end) {
-            if (tok_is(i, "(")) ++paren_depth;
-            else if (tok_is(i, ")") && paren_depth > 0) --paren_depth;
-            if (paren_depth == 0 && tok_is(i, ",")) break;
+            if (tok_is(i, "(") || tok_is(i, "[")) ++depth;
+            else if (tok_is(i, ")") || tok_is(i, "]")) { if (depth > 0) --depth; }
+            if (depth == 0 && tok_is(i, ",")) break;
             ++i;
         }
+        int colon = -1;
+        for (int k = begin; k < i; ++k) if (tok_is(k, ":")) { colon = k; break; }
+        if (colon != begin + 1 || tokens[begin].type != TOK_IDENT) die_at(begin, "invalid function parameter");
+        CType t = parse_type_range(colon + 1, i, p);
+        if (t.kind == TYPE_UNKNOWN) die_at(begin, "unknown function parameter type");
         if (!first) fputs(", ", out);
         first = false;
-
-        int count = i - begin;
-        if (count >= 3 && tok_is(begin + 1, ":")) {
-            fprintf(out, "%s %s", tokens[begin + 2].text, tokens[begin].text);
-            for (int k = begin + 3; k < i; ++k) fprintf(out, "%s", tokens[k].text);
-        } else {
-            for (int k = begin; k < i; ++k) {
-                if (k > begin) fputc(' ', out);
-                fprintf(out, "%s", tokens[k].text);
-            }
-        }
-        if (i < end && tok_is(i, ",")) ++i;
+        emit_c_decl(out, &t, tokens[begin].text);
+        free_type(&t);
+        if (i < end) ++i;
     }
     fputs(")", out);
 }
@@ -1804,6 +1847,13 @@ static bool is_integral_type(const CType *t) {
     return t && (t->kind == TYPE_INT || t->kind == TYPE_UINT || t->kind == TYPE_BOOL || t->kind == TYPE_ENUM);
 }
 
+static const TypeAliasDecl *find_type_alias(const Program *p, const char *name) {
+    if (!p || !name) return NULL;
+    for (size_t i = 0; i < p->alias_count; ++i)
+        if (strcmp(p->aliases[i].name, name) == 0) return &p->aliases[i];
+    return NULL;
+}
+
 static CType parse_type_range(int start, int end, const Program *p) {
     if (start >= end) return type_unknown();
     int i = start;
@@ -1826,6 +1876,8 @@ static CType parse_type_range(int start, int end, const Program *p) {
     else if (strcmp(name, "i32") == 0) t = type_simple(TYPE_INT, 32, 1, name);
     else if (strcmp(name, "i64") == 0) t = type_simple(TYPE_INT, 64, 1, name);
     else if (strcmp(name, "char") == 0) t = type_simple(TYPE_INT, 8, 1, name);
+    else if (strcmp(name, "usize") == 0) t = type_simple(TYPE_UINT, (int)(sizeof(size_t) * 8), 0, name);
+    else if (strcmp(name, "isize") == 0) t = type_simple(TYPE_INT, (int)(sizeof(ptrdiff_t) * 8), 1, name);
     else {
         for (size_t ei = 0; ei < p->enum_count; ++ei) {
             if (strcmp(p->enums[ei].name, name) == 0) {
@@ -1837,6 +1889,17 @@ static CType parse_type_range(int start, int end, const Program *p) {
             if (strcmp(p->structs[si].name, name) == 0) {
                 t = type_simple(TYPE_STRUCT, 0, 0, name);
                 break;
+            }
+        }
+        if (t.kind == TYPE_UNKNOWN) {
+            const TypeAliasDecl *alias = find_type_alias(p, name);
+            if (alias) {
+                static int alias_depth = 0;
+                if (++alias_depth > 64) die_at(start, "type alias recursion too deep");
+                t = parse_type_range(alias->type_start, alias->type_end, p);
+                --alias_depth;
+                if (t.kind != TYPE_UNKNOWN && t.name[0] == '\0')
+                    snprintf(t.name, sizeof(t.name), "%s", name);
             }
         }
     }
@@ -1867,6 +1930,23 @@ static bool types_compatible(const CType *a, const CType *b) {
         return a->array_count == b->array_count && types_compatible(a->base, b->base);
     }
     return false;
+}
+
+static bool abi_types_compatible(const CType *a, const CType *b) {
+    if (!a || !b) return false;
+    if (a->kind == TYPE_UNKNOWN || b->kind == TYPE_UNKNOWN) return false;
+    if (a->kind != b->kind) return false;
+    if (a->kind == TYPE_INT || a->kind == TYPE_UINT || a->kind == TYPE_BOOL)
+        return a->bits == b->bits && a->is_signed == b->is_signed;
+    if (a->kind == TYPE_STRING && b->kind == TYPE_STRING) return true;
+    if (a->kind == TYPE_ENUM || a->kind == TYPE_STRUCT) return strcmp(a->name, b->name) == 0;
+    if (a->kind == TYPE_PTR && b->kind == TYPE_PTR) {
+        if (a->base->kind == TYPE_VOID || b->base->kind == TYPE_VOID) return true;
+        return abi_types_compatible(a->base, b->base);
+    }
+    if (a->kind == TYPE_ARRAY && b->kind == TYPE_ARRAY)
+        return a->array_count == b->array_count && abi_types_compatible(a->base, b->base);
+    return a->kind == TYPE_VOID && b->kind == TYPE_VOID;
 }
 
 static const StructDecl *find_struct(const Program *p, const char *name) {
@@ -2157,7 +2237,12 @@ static CType check_expr(const Program *p, TypeEnv *env, const Expr *e) {
                         char pn[128]; CType pt = type_unknown();
                         if (function_param_at(fn, p, i, pn, sizeof(pn), &pt)) {
                             CType at = check_expr(p, env, e->as.call.args[i]);
-                            if (!types_compatible(&pt, &at)) die_at(-1, "function argument type mismatch");
+                            bool ok;
+                            if (fn->is_extern && e->as.call.args[i]->kind == EXPR_INT && is_integral_type(&pt))
+                                ok = true; /* integer literals are representable C ABI constants */
+                            else
+                                ok = fn->is_extern ? abi_types_compatible(&pt, &at) : types_compatible(&pt, &at);
+                            if (!ok) die_at(-1, fn->is_extern ? "C ABI argument type mismatch" : "function argument type mismatch");
                             free_type(&pt); free_type(&at);
                         }
                     }
@@ -2280,10 +2365,42 @@ static void emit_c_type_tokens(FILE *out, int start, int end) {
     }
 }
 
+static void emit_struct_fields(FILE *out, const Program *p, const StructDecl *d) {
+    int i = d->fields_start;
+    while (i < d->fields_end) {
+        if (tok_is(i, ";")) { ++i; continue; }
+        int begin = i;
+        while (i < d->fields_end && !tok_is(i, ";")) ++i;
+        int stop = i;
+        int colon = -1;
+        for (int k = begin; k < stop; ++k) {
+            if (tok_is(k, ":")) { colon = k; break; }
+        }
+        fputs("    ", out);
+        if (colon == begin + 1 && tokens[begin].type == TOK_IDENT) {
+            /* Native C* field spelling: name: Type */
+            CType t = parse_type_range(colon + 1, stop, p);
+            if (t.kind == TYPE_UNKNOWN) die_at(begin, "unknown struct field type");
+            emit_c_decl(out, &t, tokens[begin].text);
+            free_type(&t);
+        } else {
+            /* Also accept C-compatible field spelling: Type name[...].
+             * This is important for importing/using existing C structs. */
+            for (int k = begin; k < stop; ++k) {
+                if (k > begin) fputc(' ', out);
+                fputs(tokens[k].text, out);
+            }
+        }
+        fputs(";\n", out);
+        if (i < d->fields_end) ++i;
+    }
+}
+
 static void emit_program(FILE *out, Program *p) {
-    fputs("#include <stdio.h>\n#include <stdint.h>\n#include <stdlib.h>\n#include <stdbool.h>\n\n", out);
+    fputs("#include <stdio.h>\n#include <stdint.h>\n#include <stdlib.h>\n#include <stdbool.h>\n#include <stddef.h>\n\n", out);
     fputs("#if defined(__GNUC__) || defined(__clang__)\n#define CSTAR_UNUSED __attribute__((unused))\n#else\n#define CSTAR_UNUSED\n#endif\n\n", out);
     fputs("typedef uint64_t u64;\ntypedef uint32_t u32;\ntypedef uint16_t u16;\ntypedef uint8_t u8;\n", out);
+    fputs("typedef size_t usize; typedef ptrdiff_t isize;\n", out);
     fputs("typedef int64_t i64; typedef int32_t i32; typedef int16_t i16; typedef int8_t i8;\n", out);
     fputs("\n", out);
 
@@ -2301,51 +2418,66 @@ static void emit_program(FILE *out, Program *p) {
     for (size_t s = 0; s < p->struct_count; ++s) {
         StructDecl *d = &p->structs[s];
         fprintf(out, "typedef struct %s {\n", d->name);
-        for (int i = d->fields_start; i < d->fields_end; ++i) {
-            if (tok_is(i, ";")) fputs(";\n", out);
-            else emit_token(out, i);
-        }
+        emit_struct_fields(out, p, d);
         fprintf(out, "} %s;\n\n", d->name);
     }
 
     for (size_t c = 0; c < p->comptime_count; ++c) emit_comptime(out, &p->comptimes[c]);
 
-    /* C ABI declarations are emitted as ordinary C prototypes. */
+    /* Type aliases are lowered to native C typedefs. */
+    for (size_t a = 0; a < p->alias_count; ++a) {
+        const TypeAliasDecl *ad = &p->aliases[a];
+        CType t = parse_type_range(ad->type_start, ad->type_end, p);
+        if (t.kind == TYPE_UNKNOWN) die_at(ad->type_start, "unknown type in alias");
+        if (t.kind == TYPE_STRUCT) {
+            fprintf(out, "typedef struct %s %s;\n", t.name, ad->name);
+        } else if (t.kind == TYPE_PTR && t.base && t.base->kind == TYPE_STRUCT) {
+            fprintf(out, "typedef struct %s *%s;\n", t.base->name, ad->name);
+        } else {
+            fputs("typedef ", out);
+            if (t.kind == TYPE_PTR) { emit_c_type_value(out, t.base); fprintf(out, " *%s;\n", ad->name); }
+            else if (t.kind == TYPE_ARRAY) {
+                emit_c_decl(out, &t, ad->name); fputs(";\n", out);
+            } else {
+                emit_c_type_value(out, &t); fprintf(out, " %s;\n", ad->name);
+            }
+        }
+        free_type(&t);
+    }
+    if (p->alias_count) fputc('\n', out);
+
+    /* C ABI declarations use parsed C* types, so pointers and aliases lower correctly. */
     for (size_t f = 0; f < p->function_count; ++f) {
         FunctionDecl *fn = &p->functions[f];
         if (!fn->is_extern) continue;
+        CType ret = type_simple(TYPE_INT, 32, 1, "int");
         if (fn->return_start < fn->return_end) {
-            for (int k = fn->return_start; k < fn->return_end; ++k) {
-                fputs(tokens[k].text, out);
-                if (k + 1 < fn->return_end) fputc(' ', out);
-            }
-        } else {
-            fputs("int", out);
+            ret = parse_type_range(fn->return_start, fn->return_end, p);
+            if (ret.kind == TYPE_UNKNOWN) die_at(fn->return_start, "unknown extern return type");
         }
-        fputc(' ', out);
+        if (ret.kind == TYPE_PTR) { emit_c_type_value(out, ret.base); fputs(" *", out); }
+        else emit_c_type_value(out, &ret), fputc(' ', out);
         fputs(fn->name, out);
-        if (fn->params_start >= fn->params_end) fputs("(void)", out);
-        else emit_function_params(out, fn->params_start, fn->params_end);
+        emit_function_params_typed(out, p, fn->params_start, fn->params_end);
         fputs(";\n", out);
+        free_type(&ret);
     }
     if (p->function_count) fputc('\n', out);
 
     for (size_t f = 0; f < p->function_count; ++f) {
         FunctionDecl *fn = &p->functions[f];
         if (fn->is_extern) continue;
-        if (fn->return_start < fn->return_end && tok_is(fn->return_start, "->")) {
-            for (int k = fn->return_start + 1; k < fn->return_end; ++k) {
-                fprintf(out, "%s", tokens[k].text);
-                if (k + 1 < fn->return_end) fputc(' ', out);
-            }
-            fputc(' ', out);
-        } else {
-            fputs("int ", out);
+        CType ret = type_simple(TYPE_INT, 32, 1, "int");
+        if (fn->return_start < fn->return_end) {
+            ret = parse_type_range(fn->return_start, fn->return_end, p);
+            if (ret.kind == TYPE_UNKNOWN) die_at(fn->return_start, "unknown function return type");
         }
+        if (ret.kind == TYPE_PTR) { emit_c_type_value(out, ret.base); fputs(" *", out); }
+        else { emit_c_type_value(out, &ret); fputc(' ', out); }
         fprintf(out, "%s", fn->name);
-        if (fn->params_start >= fn->params_end) fputs("(void)", out);
-        else emit_function_params(out, fn->params_start, fn->params_end);
+        emit_function_params_typed(out, p, fn->params_start, fn->params_end);
         fputs(" {\n", out);
+        free_type(&ret);
 
         /* Register string locals before printing statements with interpolation. */
         register_stmt_strings(fn->body);
@@ -2498,14 +2630,14 @@ int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], "--emit-module") == 0) {
         emit_module_mode = true;
         if (argc < 3) {
-            fprintf(stderr, "C* Compiler v0.12\nUsage: %s <file.cppo> | %s --emit-module <file.cppo> [output.cso]\n", argv[0], argv[0]);
+            fprintf(stderr, "C* Compiler v0.13\nUsage: %s <file.cppo> | %s --emit-module <file.cppo> [output.cso]\n", argv[0], argv[0]);
             return 1;
         }
         input_path = argv[2];
         if (argc >= 4) object_path_arg = argv[3];
     } else {
         if (argc < 2) {
-            fprintf(stderr, "C* Compiler v0.12\nUsage: %s <file.cppo> | %s --emit-module <file.cppo> [output.cso]\n", argv[0], argv[0]);
+            fprintf(stderr, "C* Compiler v0.13\nUsage: %s <file.cppo> | %s --emit-module <file.cppo> [output.cso]\n", argv[0], argv[0]);
             return 1;
         }
         input_path = argv[1];
@@ -2575,12 +2707,12 @@ int main(int argc, char **argv) {
             clear_symbols();
             return 1;
         }
-        printf("[C* Compiler v0.12] module built: %s + %s\n", hppo_path, cso_path);
+        printf("[C* Compiler v0.13] module built: %s + %s\n", hppo_path, cso_path);
         free(default_hppo);
         free(default_cso);
         free(stem);
     } else {
-        printf("[C* Compiler v0.12] compiled successfully, output.c generated\n");
+        printf("[C* Compiler v0.13] compiled successfully, output.c generated\n");
         if (program.link_count) {
             printf("C* module links:");
             for (size_t i = 0; i < program.link_count; ++i) printf(" %s", program.links[i].path);
