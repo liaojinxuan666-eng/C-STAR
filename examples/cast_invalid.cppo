@@ -1,0 +1,6 @@
+struct Pair { a: u32; };
+fn main() -> int {
+    let p: Pair = Pair();
+    let x: u64 = cast(u64, p);
+    return x;
+}

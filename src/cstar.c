@@ -14,7 +14,7 @@
 #define MAX_SYMBOLS 1000
 
 /*
- * C* v0.13
+ * C* v0.14
  *
  * The frontend parses runtime expressions into an AST and provides a small,
  * deterministic module/header import layer before parsing.
@@ -50,7 +50,10 @@ typedef enum {
     EXPR_BINARY,
     EXPR_CALL,
     EXPR_MEMBER,
-    EXPR_INDEX
+    EXPR_INDEX,
+    EXPR_CAST,
+    EXPR_SIZEOF,
+    EXPR_ALIGNOF
 } ExprKind;
 
 typedef struct Expr Expr;
@@ -58,7 +61,10 @@ typedef struct Expr Expr;
 struct Expr {
     ExprKind kind;
     union {
-        long long int_val;
+        struct {
+            long long value;
+            char suffix[16];
+        } int_lit;
         char *str_val;
         char *ident;
         struct {
@@ -84,6 +90,17 @@ struct Expr {
             Expr *base;
             Expr *index;
         } index;
+        struct {
+            int type_start;
+            int type_end;
+            Expr *operand;
+        } cast_expr;
+        struct {
+            int type_start;
+            int type_end;
+            Expr *operand;
+            int is_type;
+        } builtin_size;
     } as;
 };
 
@@ -306,7 +323,7 @@ static long long eval_comptime_ast(const Expr *e, const char *loop_var, long lon
 
     switch (e->kind) {
         case EXPR_INT:
-            return e->as.int_val;
+            return e->as.int_lit.value;
 
         case EXPR_IDENT:
             if (loop_var && strcmp(e->as.ident, loop_var) == 0) return loop_val;
@@ -323,6 +340,13 @@ static long long eval_comptime_ast(const Expr *e, const char *loop_var, long lon
             die_at(-1, "unsupported unary operator in comptime expression");
             return 0;
         }
+
+        case EXPR_CAST:
+            return eval_comptime_ast(e->as.cast_expr.operand, loop_var, loop_val);
+        case EXPR_SIZEOF:
+        case EXPR_ALIGNOF:
+            die_at(-1, "sizeof/alignof is not a comptime value");
+            return 0;
 
         case EXPR_BINARY: {
             const char *op = e->as.binary.op;
@@ -703,6 +727,13 @@ static void free_expr(Expr *expr) {
             free_expr(expr->as.index.base);
             free_expr(expr->as.index.index);
             break;
+        case EXPR_CAST:
+            free_expr(expr->as.cast_expr.operand);
+            break;
+        case EXPR_SIZEOF:
+        case EXPR_ALIGNOF:
+            free_expr(expr->as.builtin_size.operand);
+            break;
     }
     free(expr);
 }
@@ -762,6 +793,12 @@ typedef struct {
     int end;
 } ExprParser;
 
+/* Forward declaration: sizeof/alignof/cast parse C* type names using the
+ * program type table. */
+static CType parse_type_range(int start, int end, const Program *p);
+static Expr *parse_expr_range(int start, int end);
+static void emit_c_type_value(FILE *out, const CType *t);
+
 static bool token_is_binary_operator(int i) {
     if (i < 0 || i >= token_count) return false;
     static const char *ops[] = {
@@ -801,12 +838,58 @@ static Expr *parse_primary(ExprParser *p) {
 
     if (tokens[i].type == TOK_NUMBER) {
         e = new_expr(EXPR_INT);
-        e->as.int_val = strtoll(tokens[i].text, NULL, 0);
+        e->as.int_lit.value = strtoll(tokens[i].text, NULL, 0);
+        e->as.int_lit.suffix[0] = '\0';
         ++p->pos;
+        if (p->pos < p->end && tokens[p->pos].type == TOK_IDENT) {
+            const char *suffix = tokens[p->pos].text;
+            const char *valid[] = {"u8","u16","u32","u64","i8","i16","i32","i64","usize","isize"};
+            for (size_t si = 0; si < sizeof(valid)/sizeof(valid[0]); ++si) {
+                if (strcmp(suffix, valid[si]) == 0) {
+                    snprintf(e->as.int_lit.suffix, sizeof(e->as.int_lit.suffix), "%s", suffix);
+                    ++p->pos;
+                    break;
+                }
+            }
+        }
     } else if (tokens[i].type == TOK_STRING) {
         e = new_expr(EXPR_STRING);
         e->as.str_val = xstrdup(tokens[i].text);
         ++p->pos;
+    } else if (tokens[i].type == TOK_IDENT &&
+               (strcmp(tokens[i].text, "cast") == 0 ||
+                strcmp(tokens[i].text, "sizeof") == 0 ||
+                strcmp(tokens[i].text, "alignof") == 0) &&
+               tok_is(i + 1, "(")) {
+        const char *builtin = tokens[i].text;
+        int open = i + 1;
+        int close = find_matching_paren(open, p->end);
+        if (close >= p->end) die_at(open, "unterminated builtin call");
+
+        if (strcmp(builtin, "cast") == 0) {
+            int comma = -1, depth = 0;
+            for (int k = open + 1; k < close; ++k) {
+                if (tok_is(k, "(") || tok_is(k, "[")) ++depth;
+                else if ((tok_is(k, ")") || tok_is(k, "]")) && depth > 0) --depth;
+                else if (depth == 0 && tok_is(k, ",")) { comma = k; break; }
+            }
+            if (comma < 0) die_at(open, "cast expects cast(Type, expression)");
+            if (comma == open + 1) die_at(comma, "cast target type is empty");
+            if (comma + 1 >= close) die_at(comma, "cast expression is empty");
+            e = new_expr(EXPR_CAST);
+            e->as.cast_expr.type_start = open + 1;
+            e->as.cast_expr.type_end = comma;
+            e->as.cast_expr.operand = parse_expr_range(comma + 1, close);
+        } else {
+            e = new_expr(strcmp(builtin, "sizeof") == 0 ? EXPR_SIZEOF : EXPR_ALIGNOF);
+            e->as.builtin_size.type_start = open + 1;
+            e->as.builtin_size.type_end = close;
+            e->as.builtin_size.operand = NULL;
+            e->as.builtin_size.is_type = strcmp(builtin, "alignof") == 0;
+            if (!e->as.builtin_size.is_type && open + 1 < close)
+                e->as.builtin_size.operand = parse_expr_range(open + 1, close);
+        }
+        p->pos = close + 1;
     } else if (tokens[i].type == TOK_IDENT) {
         e = new_expr(EXPR_IDENT);
         e->as.ident = xstrdup(tokens[i].text);
@@ -1497,11 +1580,19 @@ static void clear_symbols(void) {
     symbol_count = 0;
 }
 
+static const Program *current_emit_program = NULL;
+static CType type_unknown(void);
+static void free_type(CType *t);
+
 static void emit_expr(FILE *out, const Expr *e) {
     if (!e) return;
     switch (e->kind) {
         case EXPR_INT:
-            fprintf(out, "%lld", e->as.int_val);
+            if (e->as.int_lit.suffix[0]) {
+                fprintf(out, "(%s)%lld", e->as.int_lit.suffix, e->as.int_lit.value);
+            } else {
+                fprintf(out, "%lld", e->as.int_lit.value);
+            }
             break;
         case EXPR_STRING:
             fprintf(out, "%s", e->as.str_val);
@@ -1540,6 +1631,43 @@ static void emit_expr(FILE *out, const Expr *e) {
             emit_expr(out, e->as.index.index);
             fputc(']', out);
             break;
+        case EXPR_CAST: {
+            CType target = parse_type_range(e->as.cast_expr.type_start, e->as.cast_expr.type_end, current_emit_program);
+            if (target.kind == TYPE_UNKNOWN) {
+                /* Builtin types need no Program context; named types are resolved
+                 * during type checking and should never reach this failure path. */
+                target = type_unknown();
+            }
+            fputc('(', out);
+            emit_c_type_value(out, &target);
+            fputc(')', out);
+            fputc('(', out);
+            emit_expr(out, e->as.cast_expr.operand);
+            fputc(')', out);
+            free_type(&target);
+            break;
+        }
+        case EXPR_SIZEOF:
+        case EXPR_ALIGNOF: {
+            CType t = parse_type_range(e->as.builtin_size.type_start, e->as.builtin_size.type_end, current_emit_program);
+            if (t.kind != TYPE_UNKNOWN) {
+                fputs(e->kind == EXPR_SIZEOF ? "sizeof(" : "_Alignof(", out);
+                if (t.kind == TYPE_ARRAY) {
+                    emit_c_type_value(out, t.base);
+                    fprintf(out, "[%zu]", t.array_count);
+                } else {
+                    emit_c_type_value(out, &t);
+                }
+                fputc(')', out);
+                free_type(&t);
+            } else {
+                free_type(&t);
+                fputs("sizeof(", out);
+                emit_expr(out, e->as.builtin_size.operand);
+                fputc(')', out);
+            }
+            break;
+        }
     }
 }
 
@@ -1588,7 +1716,7 @@ static void emit_print(FILE *out, int string_token) {
     else fprintf(out, "    printf(\"%s\\n\");\n", fmt);
 }
 
-static void emit_c_type_tokens(FILE *out, int start, int end);
+
 
 static void emit_c_type_value(FILE *out, const CType *t) {
     if (!t) { fputs("int", out); return; }
@@ -1651,30 +1779,17 @@ static void emit_stmt_list(FILE *out, const Stmt *stmt, int indent) {
                 if (s->as.let_stmt.is_cpu_ctor) {
                     fprintf(out, "%s %s = {0};\n", s->as.let_stmt.ctor_type ? s->as.let_stmt.ctor_type : "CPU", s->as.let_stmt.name);
                 } else if (s->as.let_stmt.has_explicit_type) {
-                    int array_open = -1;
-                    for (int ti = s->as.let_stmt.type_start; ti + 2 < s->as.let_stmt.type_end; ++ti) {
-                        if (tok_is(ti, "[") && tokens[ti + 1].type == TOK_NUMBER && tok_is(ti + 2, "]")) {
-                            array_open = ti;
-                            break;
-                        }
-                    }
-                    if (array_open >= 0) {
-                        emit_c_type_tokens(out, s->as.let_stmt.type_start, array_open);
-                        fprintf(out, " %s", s->as.let_stmt.name);
-                        for (int ti = array_open; ti < s->as.let_stmt.type_end; ++ti) fputs(tokens[ti].text, out);
-                        fputs(" = ", out);
-                    } else {
-                        emit_c_type_tokens(out, s->as.let_stmt.type_start, s->as.let_stmt.type_end);
-                        fprintf(out, " %s = ", s->as.let_stmt.name);
-                    }
-                    bool array_zero = false;
-                    if (s->as.let_stmt.expr && s->as.let_stmt.expr->kind == EXPR_INT &&
-                        s->as.let_stmt.expr->as.int_val == 0 && array_open >= 0) {
-                        array_zero = true;
-                    }
+                    CType declared = parse_type_range(s->as.let_stmt.type_start, s->as.let_stmt.type_end, current_emit_program);
+                    if (declared.kind == TYPE_UNKNOWN) die_at(s->as.let_stmt.type_start, "unknown type in let declaration");
+                    emit_c_decl(out, &declared, s->as.let_stmt.name);
+                    fputs(" = ", out);
+                    bool array_zero = declared.kind == TYPE_ARRAY && s->as.let_stmt.expr &&
+                                      s->as.let_stmt.expr->kind == EXPR_INT &&
+                                      s->as.let_stmt.expr->as.int_lit.value == 0;
                     if (array_zero) fputs("{0}", out);
                     else emit_expr(out, s->as.let_stmt.expr);
                     fputs(";\n", out);
+                    free_type(&declared);
                 } else {
                     emit_c_decl(out, s->as.let_stmt.inferred_type, s->as.let_stmt.name);
                     fputs(" = ", out);
@@ -1879,20 +1994,20 @@ static CType parse_type_range(int start, int end, const Program *p) {
     else if (strcmp(name, "usize") == 0) t = type_simple(TYPE_UINT, (int)(sizeof(size_t) * 8), 0, name);
     else if (strcmp(name, "isize") == 0) t = type_simple(TYPE_INT, (int)(sizeof(ptrdiff_t) * 8), 1, name);
     else {
-        for (size_t ei = 0; ei < p->enum_count; ++ei) {
+        if (p) for (size_t ei = 0; ei < p->enum_count; ++ei) {
             if (strcmp(p->enums[ei].name, name) == 0) {
                 t = type_simple(TYPE_ENUM, 32, 1, name);
                 break;
             }
         }
-        for (size_t si = 0; si < p->struct_count && t.kind == TYPE_UNKNOWN; ++si) {
+        if (p) for (size_t si = 0; si < p->struct_count && t.kind == TYPE_UNKNOWN; ++si) {
             if (strcmp(p->structs[si].name, name) == 0) {
                 t = type_simple(TYPE_STRUCT, 0, 0, name);
                 break;
             }
         }
         if (t.kind == TYPE_UNKNOWN) {
-            const TypeAliasDecl *alias = find_type_alias(p, name);
+            const TypeAliasDecl *alias = p ? find_type_alias(p, name) : NULL;
             if (alias) {
                 static int alias_depth = 0;
                 if (++alias_depth > 64) die_at(start, "type alias recursion too deep");
@@ -2154,7 +2269,12 @@ static CType check_expr(const Program *p, TypeEnv *env, const Expr *e);
 static CType check_expr(const Program *p, TypeEnv *env, const Expr *e) {
     if (!e) return type_unknown();
     switch (e->kind) {
-        case EXPR_INT: return type_simple(TYPE_INT, 32, 1, "int");
+        case EXPR_INT:
+            if (e->as.int_lit.suffix[0] == '\0') return type_simple(TYPE_INT, 32, 1, "int");
+            if (strcmp(e->as.int_lit.suffix, "usize") == 0) return type_simple(TYPE_UINT, (int)(sizeof(size_t) * 8), 0, "usize");
+            if (strcmp(e->as.int_lit.suffix, "isize") == 0) return type_simple(TYPE_INT, (int)(sizeof(ptrdiff_t) * 8), 1, "isize");
+            if (e->as.int_lit.suffix[0] == 'u') return type_simple(TYPE_UINT, atoi(e->as.int_lit.suffix + 1), 0, e->as.int_lit.suffix);
+            return type_simple(TYPE_INT, atoi(e->as.int_lit.suffix + 1), 1, e->as.int_lit.suffix);
         case EXPR_STRING: return type_simple(TYPE_STRING, 0, 0, "string");
         case EXPR_IDENT: {
             CType t; if (env_get(env, e->as.ident, &t)) return t;
@@ -2253,6 +2373,35 @@ static CType check_expr(const Program *p, TypeEnv *env, const Expr *e) {
             for (int i = 0; i < e->as.call.arg_count; ++i) { CType t = check_expr(p, env, e->as.call.args[i]); free_type(&t); }
             return type_unknown();
         }
+        case EXPR_CAST: {
+            CType target = parse_type_range(e->as.cast_expr.type_start, e->as.cast_expr.type_end, p);
+            if (target.kind == TYPE_UNKNOWN) die_at(e->as.cast_expr.type_start, "unknown cast target type");
+            CType source = check_expr(p, env, e->as.cast_expr.operand);
+            bool ok = false;
+            if (source.kind != TYPE_UNKNOWN) {
+                if (target.kind == TYPE_VOID) ok = true;
+                else if (is_integral_type(&target) && is_integral_type(&source)) ok = true;
+                else if (target.kind == TYPE_PTR && source.kind == TYPE_PTR) ok = true;
+                else if (target.kind == TYPE_PTR && is_integral_type(&source)) ok = true;
+                else if (source.kind == TYPE_PTR && is_integral_type(&target)) ok = true;
+            }
+            if (!ok) die_at(e->as.cast_expr.type_start, "invalid explicit cast");
+            free_type(&source);
+            return target;
+        }
+        case EXPR_SIZEOF:
+        case EXPR_ALIGNOF: {
+            CType t = parse_type_range(e->as.builtin_size.type_start, e->as.builtin_size.type_end, p);
+            if (t.kind == TYPE_UNKNOWN) {
+                if (e->kind == EXPR_ALIGNOF || !e->as.builtin_size.operand)
+                    die_at(e->as.builtin_size.type_start, "unknown type in sizeof/alignof");
+                t = check_expr(p, env, e->as.builtin_size.operand);
+            }
+            if (t.kind == TYPE_UNKNOWN) die_at(-1, "cannot determine sizeof/alignof operand type");
+            if (t.kind == TYPE_VOID) die_at(-1, "sizeof/alignof cannot be applied to void");
+            free_type(&t);
+            return type_simple(TYPE_UINT, (int)(sizeof(size_t) * 8), 0, "usize");
+        }
         case EXPR_BINARY: {
             CType a = check_expr(p, env, e->as.binary.lhs);
             CType b = check_expr(p, env, e->as.binary.rhs);
@@ -2304,7 +2453,7 @@ static void check_stmt_list(const Program *p, TypeEnv *env, const Stmt *stmt, CT
                         bool zero_array_init = declared.kind == TYPE_ARRAY && t.kind == TYPE_INT &&
                                                t.bits == 32 && s->as.let_stmt.expr &&
                                                s->as.let_stmt.expr->kind == EXPR_INT &&
-                                               s->as.let_stmt.expr->as.int_val == 0;
+                                               s->as.let_stmt.expr->as.int_lit.value == 0;
                         if (!zero_array_init && !types_compatible(&declared, &t)) die_at(-1, "initializer type does not match declaration");
                         free_type(&t); t = clone_type(declared); free_type(&declared);
                     }
@@ -2355,16 +2504,6 @@ static void typecheck_program(const Program *p) {
     }
 }
 
-static void emit_c_type_tokens(FILE *out, int start, int end) {
-    if (start < 0 || end <= start) { fputs("int", out); return; }
-    bool first = true;
-    for (int i = start; i < end; ++i) {
-        if (tok_is(i, "*")) { fputs(first ? "*" : " *", out); first = false; continue; }
-        if (!first) fputc(' ', out);
-        fputs(tokens[i].text, out); first = false;
-    }
-}
-
 static void emit_struct_fields(FILE *out, const Program *p, const StructDecl *d) {
     int i = d->fields_start;
     while (i < d->fields_end) {
@@ -2397,6 +2536,7 @@ static void emit_struct_fields(FILE *out, const Program *p, const StructDecl *d)
 }
 
 static void emit_program(FILE *out, Program *p) {
+    current_emit_program = p;
     fputs("#include <stdio.h>\n#include <stdint.h>\n#include <stdlib.h>\n#include <stdbool.h>\n#include <stddef.h>\n\n", out);
     fputs("#if defined(__GNUC__) || defined(__clang__)\n#define CSTAR_UNUSED __attribute__((unused))\n#else\n#define CSTAR_UNUSED\n#endif\n\n", out);
     fputs("typedef uint64_t u64;\ntypedef uint32_t u32;\ntypedef uint16_t u16;\ntypedef uint8_t u8;\n", out);
@@ -2630,14 +2770,14 @@ int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], "--emit-module") == 0) {
         emit_module_mode = true;
         if (argc < 3) {
-            fprintf(stderr, "C* Compiler v0.13\nUsage: %s <file.cppo> | %s --emit-module <file.cppo> [output.cso]\n", argv[0], argv[0]);
+            fprintf(stderr, "C* Compiler v0.14\nUsage: %s <file.cppo> | %s --emit-module <file.cppo> [output.cso]\n", argv[0], argv[0]);
             return 1;
         }
         input_path = argv[2];
         if (argc >= 4) object_path_arg = argv[3];
     } else {
         if (argc < 2) {
-            fprintf(stderr, "C* Compiler v0.13\nUsage: %s <file.cppo> | %s --emit-module <file.cppo> [output.cso]\n", argv[0], argv[0]);
+            fprintf(stderr, "C* Compiler v0.14\nUsage: %s <file.cppo> | %s --emit-module <file.cppo> [output.cso]\n", argv[0], argv[0]);
             return 1;
         }
         input_path = argv[1];
@@ -2707,12 +2847,12 @@ int main(int argc, char **argv) {
             clear_symbols();
             return 1;
         }
-        printf("[C* Compiler v0.13] module built: %s + %s\n", hppo_path, cso_path);
+        printf("[C* Compiler v0.14] module built: %s + %s\n", hppo_path, cso_path);
         free(default_hppo);
         free(default_cso);
         free(stem);
     } else {
-        printf("[C* Compiler v0.13] compiled successfully, output.c generated\n");
+        printf("[C* Compiler v0.14] compiled successfully, output.c generated\n");
         if (program.link_count) {
             printf("C* module links:");
             for (size_t i = 0; i < program.link_count; ++i) printf(" %s", program.links[i].path);

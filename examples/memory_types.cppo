@@ -1,0 +1,42 @@
+struct Pair {
+    a: u32;
+    b: u64;
+};
+
+fn main() -> int {
+    let a: u8 = 7u8;
+    let b: u64 = cast(u64, a);
+    let p: Pair = Pair();
+    let sp: usize = sizeof(Pair);
+    let sa: usize = sizeof(u32[4]);
+    let sx: usize = sizeof(a);
+    let pp: usize = sizeof(*u8);
+    let ap: usize = alignof(Pair);
+    let sp_value: usize = sizeof(p);
+    let ua: usize = alignof(*u8);
+    let wide: i64 = 42i64;
+    let si: i8 = cast(i8, wide);
+    let up: *u8 = cast(*u8, 0);
+    if b == 7u64 {
+        if sp > 0 {
+            if sp_value == sp {
+            if sa == 16 {
+                if sx == 1 {
+                    if pp == 8 {
+                        if ap > 0 {
+                            if ua > 0 {
+                                if si == 42i8 {
+                                    if up == cast(*u8, 0) {
+                                        print("v0.14 memory: ok");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                }
+            }
+        }
+            }
+    return 0;
+}

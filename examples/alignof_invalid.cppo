@@ -1,0 +1,5 @@
+fn main() -> int {
+    let x: int = 1;
+    let a: usize = alignof(x);
+    return a;
+}
