@@ -4,6 +4,9 @@
 #include <ctype.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <errno.h>
 
 #define MAX_TOKENS 40000
 #define MAX_TEXT 256
@@ -2432,17 +2435,41 @@ static void emit_hppo_file(const char *path, const Program *p) {
 
 
 static int run_clang_object(const char *input_c, const char *output_obj) {
-    size_t cap = strlen(input_c) * 4 + strlen(output_obj) * 4 + 128;
-    char *cmd = (char *)xmalloc(cap);
-    /* Paths used here are quoted for a POSIX shell. */
-    char *qin = (char *)xmalloc(strlen(input_c) * 4 + 8);
-    char *qout = (char *)xmalloc(strlen(output_obj) * 4 + 8);
-    size_t a = 0; qin[a++] = '\''; for (const char *p = input_c; *p; ++p) { if (*p == '\'') { memcpy(qin + a, "'\\''", 4); a += 4; } else qin[a++] = *p; } qin[a++] = '\''; qin[a] = '\0';
-    a = 0; qout[a++] = '\''; for (const char *p = output_obj; *p; ++p) { if (*p == '\'') { memcpy(qout + a, "'\\''", 4); a += 4; } else qout[a++] = *p; } qout[a++] = '\''; qout[a] = '\0';
-    snprintf(cmd, cap, "clang -std=c11 -O3 -c %s -o %s", qin, qout);
-    int rc = system(cmd);
-    free(cmd); free(qin); free(qout);
-    return rc;
+    /*
+     * Do not use system(): Apple marks system() unavailable on iOS.
+     * posix_spawnp() executes clang directly, without a shell, so paths
+     * containing spaces or shell metacharacters are handled safely.
+     */
+    char *const argv[] = {
+        (char *)"clang",
+        (char *)"-std=c11",
+        (char *)"-O3",
+        (char *)"-c",
+        (char *)input_c,
+        (char *)"-o",
+        (char *)output_obj,
+        NULL
+    };
+
+    pid_t pid = 0;
+    int rc = posix_spawnp(&pid, "clang", NULL, NULL, argv, NULL);
+    if (rc != 0) {
+        fprintf(stderr, "C* error: failed to launch clang: %s\n", strerror(rc));
+        return -1;
+    }
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) {
+        fprintf(stderr, "C* error: waitpid failed: %s\n", strerror(errno));
+        return -1;
+    }
+
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) {
+        fprintf(stderr, "C* error: clang terminated by signal %d\n", WTERMSIG(status));
+        return 128 + WTERMSIG(status);
+    }
+    return -1;
 }
 
 static void emit_includes_directly(FILE *out) {
