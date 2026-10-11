@@ -1,4 +1,4 @@
-# C* v0.14 — Cast + sizeof/alignof + Integer Literal Semantics
+# C* v0.15 — Low-level Operators + Atomics
 
 C* continues to follow the original principles:
 
@@ -6,72 +6,103 @@ C* continues to follow the original principles:
 - 优秀的兼容
 - 极致的简易
 
-## v0.14 additions
+## v0.15 additions
 
-### Explicit casts
-
-```cppo
-let x: u64 = cast(u64, value);
-let p: *u8 = cast(*u8, 0);
-```
-
-`cast(Type, expression)` supports explicit integer/integer and pointer/pointer
-conversions, plus integer/pointer conversions. Struct and array casts are not
-accepted because the C backend cannot represent them as scalar casts safely.
-
-### Size and alignment
+### Pointer arithmetic
 
 ```cppo
-let size: usize = sizeof(MyStruct);
-let bytes: usize = sizeof(u8[64]);
-let align: usize = alignof(MyStruct);
+let p: *u64 = &array[0];
+p += 1;
+p -= 1;
+let q: *u64 = p + 1;
+let d: isize = q - p;
 ```
 
-`sizeof(Type)`, `sizeof(expression)` and `alignof(Type)` lower directly to C
-`sizeof` / `_Alignof`. Their C* result type is `usize`.
+Pointer arithmetic is type-checked instead of being treated as generic integer arithmetic.
 
-### Integer literals
+### Increment / decrement
 
-Explicit literal suffixes are supported:
+```cppo
+++x;
+x++;
+--x;
+x--;
+```
+
+Both integer and pointer values are supported and must be assignable.
+
+### Compound assignments
+
+```cppo
+x += y;
+x -= y;
+x &= mask;
+x |= mask;
+x ^= mask;
+x <<= 2;
+x >>= 1;
+```
+
+Pointer `+=` / `-=` accepts integral offsets.
+
+### Atomic primitives
+
+C* exposes a small low-level atomic surface that lowers directly to Clang/GCC `__atomic_*` builtins:
+
+```cppo
+atomic_store(&x, 20u64, relaxed);
+let a: u64 = atomic_load(&x, acquire);
+let b: u64 = atomic_fetch_add(&x, 5u64, acq_rel);
+let c: u64 = atomic_fetch_sub(&x, 2u64, seq_cst);
+let d: u64 = atomic_exchange(&x, 7u64);
+atomic_fence(seq_cst);
+```
+
+Supported memory orders:
 
 ```text
-u8 u16 u32 u64
- i8  i16 i32 i64
-usize isize
+relaxed
+consume
+acquire
+release
+acq_rel
+seq_cst
 ```
 
-Example:
-
-```cppo
-let a: u8 = 7u8;
-let b: u64 = 42u64;
-let c: i64 = 7i64;
-```
-
-The frontend retains the literal's declared integer width/sign so later type
-checking can use the intended ABI type instead of treating every literal as
-plain `int`.
+The compiler uses `__ATOMIC_*` constants in the generated C. No C* runtime is introduced.
 
 ## Compatibility
 
-Existing C* v0.13 functionality remains intact:
+The previous C* functionality remains intact:
 
 - Expression AST
 - Type system
 - Comptime AST evaluation and specialization
 - arrays / enums / pointers / structs
+- explicit casts / sizeof / alignof
+- type aliases
 - `extern fn` C ABI
 - `.hppo` headers
 - `.cso` native object modules
 - iOS-safe compiler path using `posix_spawnp()` instead of `system()`
 
+## Design direction
+
+v0.15 focuses on the low-level primitives needed by system software, emulator cores and future SIMD/runtime work, while keeping the compiler AOT and C/Clang based.
+
+The next major low-level step is SIMD/intrinsic support, followed by a more explicit concurrency model.
+
 ## Verification
 
-The v0.14 regression suite covers all previous tests plus memory/type tests.
-The compiler itself is checked with:
+The full regression suite is run with:
 
 ```sh
 clang -std=c11 -Wall -Wextra -Wpedantic src/cstar.c -o cstar
+./tests/run_v015.sh
 ```
 
-Generated C is also checked with the same warning level.
+Current result:
+
+```text
+C* v0.15 regression suite: PASS
+```
