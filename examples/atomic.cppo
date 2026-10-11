@@ -1,0 +1,13 @@
+fn main() -> int {
+    let x: u64 = 10u64;
+    atomic_store(&x, 20u64, relaxed);
+    let a: u64 = atomic_load(&x, acquire);
+    let b: u64 = atomic_fetch_add(&x, 5u64, acq_rel);
+    let c: u64 = atomic_fetch_sub(&x, 2u64, seq_cst);
+    let d: u64 = atomic_exchange(&x, 7u64);
+    atomic_fence(seq_cst);
+    if a == 20u64 && b == 20u64 && c == 25u64 && d == 23u64 {
+        print("atomic: ok");
+    }
+    return 0;
+}

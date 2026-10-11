@@ -1,0 +1,19 @@
+fn main() -> int {
+    let x: u64[4] = 0;
+    let p: *u64 = &x[0];
+    p += 1;
+    p -= 1;
+    let q: *u64 = p + 1;
+    let r: *u64 = q - 1;
+    let d: isize = q - r;
+    let mut: int = 1;
+    ++mut;
+    mut++;
+    mut += 4;
+    mut <<= 1;
+    mut |= 1;
+    if mut == 13 && d == 1isize {
+        print("lowlevel: ok");
+    }
+    return 0;
+}
