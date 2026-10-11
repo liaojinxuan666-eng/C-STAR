@@ -1,4 +1,4 @@
-# C* v0.15 — Low-level Operators + Atomics
+# C* v0.16 — SIMD bridge foundation
 
 C* continues to follow the original principles:
 
@@ -6,103 +6,58 @@ C* continues to follow the original principles:
 - 优秀的兼容
 - 极致的简易
 
-## v0.15 additions
+## What this stage provides
 
-### Pointer arithmetic
+This is a first SIMD integration step, **not yet a C* vector type or compiler intrinsic syntax**.
+It adds a small native ABI bridge for common 128-bit integer-lane operations, using ARM NEON
+intrinsics when compiled for AArch64/NEON and a scalar fallback on other targets:
 
-```cppo
-let p: *u64 = &array[0];
-p += 1;
-p -= 1;
-let q: *u64 = p + 1;
-let d: isize = q - p;
-```
+- 4 × u32 add/sub/xor/compare-equal
+- 8 × u16 add
+- 16 × u8 add (wrapping lane arithmetic)
 
-Pointer arithmetic is type-checked instead of being treated as generic integer arithmetic.
+The C* program calls ordinary external functions with pointers, so the interface uses the
+existing C ABI and introduces no VM, garbage collector, or hidden runtime. The bridge allows
+us to validate semantics and target-specific code on iPhone while the compiler's direct
+vector representation is designed separately.
 
-### Increment / decrement
+## Important limitation
 
-```cppo
-++x;
-x++;
---x;
-x--;
-```
+Each operation currently crosses a C function boundary. This is appropriate for validating
+ABI, lane semantics, and backend selection, but is **not the final high-performance interface**
+for a CPU emulator's per-instruction hot path. The next stage should add C* vector types and
+lower intrinsic expressions directly into the generated C translation unit (or inline compiler
+intrinsics), eliminating these helper calls.
 
-Both integer and pointer values are supported and must be assignable.
+No performance advantage over plain C/C++ is claimed by this package. Measure generated code
+and benchmark before making such claims.
 
-### Compound assignments
+## Add to the existing repository
 
-```cppo
-x += y;
-x -= y;
-x &= mask;
-x |= mask;
-x ^= mask;
-x <<= 2;
-x >>= 1;
-```
+Copy the contents into the matching paths in the C-STAR repository:
 
-Pointer `+=` / `-=` accepts integral offsets.
+- `examples/simd128.cppo`
+- `run_v016.sh`
+- `include/cstar_simd128.h`
+- `runtime/cstar_simd128.c`
 
-### Atomic primitives
+Keep your existing `src/cstar.c`. This stage does not require replacing the compiler.
 
-C* exposes a small low-level atomic surface that lowers directly to Clang/GCC `__atomic_*` builtins:
+## Run on the existing iPhone setup
 
-```cppo
-atomic_store(&x, 20u64, relaxed);
-let a: u64 = atomic_load(&x, acquire);
-let b: u64 = atomic_fetch_add(&x, 5u64, acq_rel);
-let c: u64 = atomic_fetch_sub(&x, 2u64, seq_cst);
-let d: u64 = atomic_exchange(&x, 7u64);
-atomic_fence(seq_cst);
-```
-
-Supported memory orders:
-
-```text
-relaxed
-consume
-acquire
-release
-acq_rel
-seq_cst
-```
-
-The compiler uses `__ATOMIC_*` constants in the generated C. No C* runtime is introduced.
-
-## Compatibility
-
-The previous C* functionality remains intact:
-
-- Expression AST
-- Type system
-- Comptime AST evaluation and specialization
-- arrays / enums / pointers / structs
-- explicit casts / sizeof / alignof
-- type aliases
-- `extern fn` C ABI
-- `.hppo` headers
-- `.cso` native object modules
-- iOS-safe compiler path using `posix_spawnp()` instead of `system()`
-
-## Design direction
-
-v0.15 focuses on the low-level primitives needed by system software, emulator cores and future SIMD/runtime work, while keeping the compiler AOT and C/Clang based.
-
-The next major low-level step is SIMD/intrinsic support, followed by a more explicit concurrency model.
-
-## Verification
-
-The full regression suite is run with:
+From `/var/mobile/Documents/cstar-test`, after extracting/copying the archive contents into the project root:
 
 ```sh
-clang -std=c11 -Wall -Wextra -Wpedantic src/cstar.c -o cstar
-./tests/run_v015.sh
+sh examples/run_v016.sh
 ```
 
-Current result:
+The runner detects either `examples/` (the GitHub layout) or `tests/` (your local test layout), builds binaries into `.cstar-test-bin/`, and does not use `/tmp`. The included SIMD example can remain under `examples/` even when your older tests live under `tests/`.
+Expected new test output:
 
 ```text
-C* v0.15 regression suite: PASS
+simd128: ok
 ```
+
+The script's final PASS line is only expected after all previous regression tests and the new
+SIMD test pass. On AArch64, the runtime chooses the NEON implementation at compile time; on
+other architectures it uses the scalar fallback.

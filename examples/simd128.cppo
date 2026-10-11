@@ -1,0 +1,48 @@
+include <stdint.h>
+
+extern fn cstar_simd128_u32_add(a: *u32, b: *u32, out: *u32) -> void;
+extern fn cstar_simd128_u32_sub(a: *u32, b: *u32, out: *u32) -> void;
+extern fn cstar_simd128_u32_xor(a: *u32, b: *u32, out: *u32) -> void;
+extern fn cstar_simd128_u32_cmpeq(a: *u32, b: *u32, out: *u32) -> void;
+extern fn cstar_simd128_u16_add(a: *u16, b: *u16, out: *u16) -> void;
+extern fn cstar_simd128_u8_add(a: *u8, b: *u8, out: *u8) -> void;
+
+fn main() -> int {
+    let a: u32[4] = 0;
+    let b: u32[4] = 0;
+    let out: u32[4] = 0;
+    let cmp: u32[4] = 0;
+
+    a[0] = 1; a[1] = 2; a[2] = 3; a[3] = 4;
+    b[0] = 10; b[1] = 20; b[2] = 30; b[3] = 40;
+    cstar_simd128_u32_add(&a[0], &b[0], &out[0]);
+    if out[0] == 11 && out[1] == 22 && out[2] == 33 && out[3] == 44 {
+        cstar_simd128_u32_xor(&a[0], &b[0], &out[0]);
+        if out[0] == 11 && out[1] == 22 && out[2] == 29 && out[3] == 44 {
+            cstar_simd128_u32_sub(&b[0], &a[0], &out[0]);
+            if out[0] == 9 && out[1] == 18 && out[2] == 27 && out[3] == 36 {
+                let c: u32[4] = 0;
+                c[0] = 1; c[1] = 9; c[2] = 3; c[3] = 0;
+                cstar_simd128_u32_cmpeq(&a[0], &c[0], &cmp[0]);
+                if cmp[0] != 0 && cmp[1] == 0 && cmp[2] != 0 && cmp[3] == 0 {
+                    let h16a: u16[8] = 0;
+                    let h16b: u16[8] = 0;
+                    let h16out: u16[8] = 0;
+                    h16a[7] = 8; h16b[7] = 9;
+                    cstar_simd128_u16_add(&h16a[0], &h16b[0], &h16out[0]);
+                    if h16out[7] == 17 {
+                        let b8a: u8[16] = 0;
+                        let b8b: u8[16] = 0;
+                        let b8out: u8[16] = 0;
+                        b8a[15] = 250; b8b[15] = 10;
+                        cstar_simd128_u8_add(&b8a[0], &b8b[0], &b8out[0]);
+                        if b8out[15] == 4 {
+                            print("simd128: ok");
+                        } else { print("simd128: bad u8 wrap"); }
+                    } else { print("simd128: bad u16"); }
+                } else { print("simd128: bad compare"); }
+            } else { print("simd128: bad sub"); }
+        } else { print("simd128: bad xor"); }
+    } else { print("simd128: bad add"); }
+    return 0;
+}
