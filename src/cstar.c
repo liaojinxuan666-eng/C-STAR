@@ -14,7 +14,7 @@
 #define MAX_SYMBOLS 1000
 
 /*
- * C* v0.14
+ * C* v0.15
  *
  * The frontend parses runtime expressions into an AST and provides a small,
  * deterministic module/header import layer before parsing.
@@ -68,11 +68,11 @@ struct Expr {
         char *str_val;
         char *ident;
         struct {
-            char op[4];
+            char op[8];
             Expr *operand;
         } unary;
         struct {
-            char op[4];
+            char op[8];
             Expr *lhs;
             Expr *rhs;
         } binary;
@@ -365,6 +365,11 @@ static long long eval_comptime_ast(const Expr *e, const char *loop_var, long lon
                 if (b == 0) die_at(-1, "modulo by zero in comptime expression");
                 return a % b;
             }
+            if (strcmp(op, "&=") == 0) return a & b;
+            if (strcmp(op, "|=") == 0) return a | b;
+            if (strcmp(op, "^=") == 0) return a ^ b;
+            if (strcmp(op, "<<=") == 0) return a << b;
+            if (strcmp(op, ">>=") == 0) return a >> b;
             if (strcmp(op, "+") == 0) return a + b;
             if (strcmp(op, "-") == 0) return a - b;
             if (strcmp(op, "*") == 0) return a * b;
@@ -666,8 +671,18 @@ static void lex(const char *src) {
             continue;
         }
 
-        const char *two[] = {"==", "!=", "<=", ">=", "->", "<<", ">>", "&&", "||", "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^="};
+        const char *three[] = {"<<=", ">>="};
         bool matched = false;
+        for (size_t k = 0; k < sizeof(three) / sizeof(three[0]); ++k) {
+            if (src[i] == three[k][0] && src[i + 1] == three[k][1] && src[i + 2] == three[k][2]) {
+                add_token(TOK_SYMBOL, three[k], 3, line);
+                i += 3;
+                matched = true;
+                break;
+            }
+        }
+        if (matched) continue;
+        const char *two[] = {"==", "!=", "<=", ">=", "->", "<<", ">>", "&&", "||", "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^="};
         for (size_t k = 0; k < sizeof(two) / sizeof(two[0]); ++k) {
             if (src[i] == two[k][0] && src[i + 1] == two[k][1]) {
                 add_token(TOK_SYMBOL, two[k], 2, line);
@@ -802,7 +817,7 @@ static void emit_c_type_value(FILE *out, const CType *t);
 static bool token_is_binary_operator(int i) {
     if (i < 0 || i >= token_count) return false;
     static const char *ops[] = {
-        "=", "+=", "-=", "*=", "/=", "%=",
+        "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=",
         "||", "&&", "|", "^", "&", "==", "!=",
         "<", ">", "<=", ">=", "<<", ">>", "+", "-", "*", "/", "%"
     };
@@ -813,7 +828,9 @@ static bool token_is_binary_operator(int i) {
 
 static int binary_precedence(const char *op) {
     if (strcmp(op, "=") == 0 || strcmp(op, "+=") == 0 || strcmp(op, "-=") == 0 ||
-        strcmp(op, "*=") == 0 || strcmp(op, "/=") == 0 || strcmp(op, "%=") == 0) return 1;
+        strcmp(op, "*=") == 0 || strcmp(op, "/=") == 0 || strcmp(op, "%=") == 0 ||
+        strcmp(op, "&=") == 0 || strcmp(op, "|=") == 0 || strcmp(op, "^=") == 0 ||
+        strcmp(op, "<<=") == 0 || strcmp(op, ">>=") == 0) return 1;
     if (strcmp(op, "||") == 0) return 2;
     if (strcmp(op, "&&") == 0) return 3;
     if (strcmp(op, "|") == 0) return 4;
@@ -972,6 +989,16 @@ static Expr *parse_primary(ExprParser *p) {
             continue;
         }
 
+        if (tok_is(p->pos, "++") || tok_is(p->pos, "--")) {
+            const char *op = tok_is(p->pos, "++") ? "post++" : "post--";
+            Expr *u = new_expr(EXPR_UNARY);
+            snprintf(u->as.unary.op, sizeof(u->as.unary.op), "%s", op);
+            u->as.unary.operand = e;
+            e = u;
+            ++p->pos;
+            continue;
+        }
+
         break;
     }
 
@@ -982,7 +1009,8 @@ static Expr *parse_unary(ExprParser *p) {
     if (p->pos < p->end) {
         const char *op = tokens[p->pos].text;
         if (strcmp(op, "&") == 0 || strcmp(op, "*") == 0 || strcmp(op, "+") == 0 ||
-            strcmp(op, "-") == 0 || strcmp(op, "!") == 0 || strcmp(op, "~") == 0) {
+            strcmp(op, "-") == 0 || strcmp(op, "!") == 0 || strcmp(op, "~") == 0 ||
+            strcmp(op, "++") == 0 || strcmp(op, "--") == 0) {
             ++p->pos;
             Expr *e = new_expr(EXPR_UNARY);
             snprintf(e->as.unary.op, sizeof(e->as.unary.op), "%s", op);
@@ -1584,6 +1612,39 @@ static const Program *current_emit_program = NULL;
 static CType type_unknown(void);
 static void free_type(CType *t);
 
+static void emit_expr(FILE *out, const Expr *e);
+
+static const char *cstar_atomic_order(const char *name) {
+    if (strcmp(name, "relaxed") == 0) return "__ATOMIC_RELAXED";
+    if (strcmp(name, "acquire") == 0) return "__ATOMIC_ACQUIRE";
+    if (strcmp(name, "release") == 0) return "__ATOMIC_RELEASE";
+    if (strcmp(name, "acq_rel") == 0) return "__ATOMIC_ACQ_REL";
+    if (strcmp(name, "seq_cst") == 0) return "__ATOMIC_SEQ_CST";
+    if (strcmp(name, "consume") == 0) return "__ATOMIC_CONSUME";
+    return NULL;
+}
+
+static bool is_atomic_builtin_name(const char *name) {
+    return strcmp(name, "atomic_load") == 0 ||
+           strcmp(name, "atomic_store") == 0 ||
+           strcmp(name, "atomic_fetch_add") == 0 ||
+           strcmp(name, "atomic_fetch_sub") == 0 ||
+           strcmp(name, "atomic_exchange") == 0 ||
+           strcmp(name, "atomic_fence") == 0;
+}
+
+static void emit_atomic_order(FILE *out, const Expr *e) {
+    if (e) {
+        if (e->kind == EXPR_IDENT) {
+            const char *mapped = cstar_atomic_order(e->as.ident);
+            if (mapped) { fputs(mapped, out); return; }
+        }
+        emit_expr(out, e);
+        return;
+    }
+    fputs("__ATOMIC_SEQ_CST", out);
+}
+
 static void emit_expr(FILE *out, const Expr *e) {
     if (!e) return;
     switch (e->kind) {
@@ -1597,12 +1658,20 @@ static void emit_expr(FILE *out, const Expr *e) {
         case EXPR_STRING:
             fprintf(out, "%s", e->as.str_val);
             break;
-        case EXPR_IDENT:
-            fprintf(out, "%s", e->as.ident);
+        case EXPR_IDENT: {
+            const char *mapped = cstar_atomic_order(e->as.ident);
+            if (mapped) fputs(mapped, out);
+            else fprintf(out, "%s", e->as.ident);
             break;
+        }
         case EXPR_UNARY:
-            fprintf(out, "%s", e->as.unary.op);
-            emit_expr(out, e->as.unary.operand);
+            if (strcmp(e->as.unary.op, "post++") == 0 || strcmp(e->as.unary.op, "post--") == 0) {
+                fputc('(', out); emit_expr(out, e->as.unary.operand);
+                fprintf(out, ")%s", strcmp(e->as.unary.op, "post++") == 0 ? "++" : "--");
+            } else {
+                fprintf(out, "%s", e->as.unary.op);
+                emit_expr(out, e->as.unary.operand);
+            }
             break;
         case EXPR_BINARY:
             fputc('(', out);
@@ -1612,13 +1681,36 @@ static void emit_expr(FILE *out, const Expr *e) {
             fputc(')', out);
             break;
         case EXPR_CALL:
-            emit_expr(out, e->as.call.callee);
-            fputc('(', out);
-            for (int i = 0; i < e->as.call.arg_count; ++i) {
-                if (i) fputs(", ", out);
-                emit_expr(out, e->as.call.args[i]);
+            if (e->as.call.callee->kind == EXPR_IDENT && is_atomic_builtin_name(e->as.call.callee->as.ident)) {
+                const char *name = e->as.call.callee->as.ident;
+                int n = e->as.call.arg_count;
+                if (strcmp(name, "atomic_load") == 0) {
+                    fputs("__atomic_load_n(", out); emit_expr(out, e->as.call.args[0]); fputs(", ", out);
+                    emit_atomic_order(out, n >= 2 ? e->as.call.args[1] : NULL); fputc(')', out);
+                } else if (strcmp(name, "atomic_store") == 0) {
+                    fputs("__atomic_store_n(", out); emit_expr(out, e->as.call.args[0]); fputs(", ", out); emit_expr(out, e->as.call.args[1]); fputs(", ", out);
+                    emit_atomic_order(out, n >= 3 ? e->as.call.args[2] : NULL); fputc(')', out);
+                } else if (strcmp(name, "atomic_fetch_add") == 0 || strcmp(name, "atomic_fetch_sub") == 0) {
+                    fprintf(out, "__atomic_%s(", strcmp(name, "atomic_fetch_add") == 0 ? "fetch_add" : "fetch_sub");
+                    emit_expr(out, e->as.call.args[0]); fputs(", ", out); emit_expr(out, e->as.call.args[1]); fputs(", ", out);
+                    emit_atomic_order(out, n >= 3 ? e->as.call.args[2] : NULL); fputc(')', out);
+                } else if (strcmp(name, "atomic_exchange") == 0) {
+                    fputs("__atomic_exchange_n(", out);
+                    emit_expr(out, e->as.call.args[0]); fputs(", ", out); emit_expr(out, e->as.call.args[1]); fputs(", ", out);
+                    emit_atomic_order(out, n >= 3 ? e->as.call.args[2] : NULL); fputc(')', out);
+                } else {
+                    fputs("__atomic_thread_fence(", out);
+                    emit_atomic_order(out, n >= 1 ? e->as.call.args[0] : NULL); fputc(')', out);
+                }
+            } else {
+                emit_expr(out, e->as.call.callee);
+                fputc('(', out);
+                for (int i = 0; i < e->as.call.arg_count; ++i) {
+                    if (i) fputs(", ", out);
+                    emit_expr(out, e->as.call.args[i]);
+                }
+                fputc(')', out);
             }
-            fputc(')', out);
             break;
         case EXPR_MEMBER:
             emit_expr(out, e->as.member.base);
@@ -2278,6 +2370,7 @@ static CType check_expr(const Program *p, TypeEnv *env, const Expr *e) {
         case EXPR_STRING: return type_simple(TYPE_STRING, 0, 0, "string");
         case EXPR_IDENT: {
             CType t; if (env_get(env, e->as.ident, &t)) return t;
+            if (cstar_atomic_order(e->as.ident)) return type_simple(TYPE_INT, 32, 1, "int");
             const char *enum_name = NULL;
             if (find_enum_constant(p, e->as.ident, &enum_name))
                 return type_simple(TYPE_ENUM, 32, 1, enum_name);
@@ -2295,6 +2388,11 @@ static CType check_expr(const Program *p, TypeEnv *env, const Expr *e) {
             }
             if (strcmp(op, "!") == 0 || strcmp(op, "~") == 0 || strcmp(op, "+") == 0 || strcmp(op, "-") == 0) {
                 if (!is_integral_type(&a)) die_at(-1, "unary operator requires an integer value");
+                return a;
+            }
+            if (strcmp(op, "++") == 0 || strcmp(op, "--") == 0 || strcmp(op, "post++") == 0 || strcmp(op, "post--") == 0) {
+                if (!expr_is_lvalue(e->as.unary.operand)) die_at(-1, "increment/decrement requires an assignable value");
+                if (a.kind != TYPE_PTR && !is_integral_type(&a)) die_at(-1, "increment/decrement requires integer or pointer");
                 return a;
             }
             return type_unknown();
@@ -2323,6 +2421,43 @@ static CType check_expr(const Program *p, TypeEnv *env, const Expr *e) {
         case EXPR_CALL: {
             if (e->as.call.callee->kind == EXPR_IDENT) {
                 const char *name = e->as.call.callee->as.ident;
+
+                if (is_atomic_builtin_name(name)) {
+                    int n = e->as.call.arg_count;
+                    if (strcmp(name, "atomic_load") == 0) {
+                        if (n != 1 && n != 2) die_at(-1, "atomic_load expects (pointer[, memory_order])");
+                        CType pt = check_expr(p, env, e->as.call.args[0]);
+                        if (pt.kind != TYPE_PTR || !is_integral_type(pt.base)) die_at(-1, "atomic_load requires a pointer to an integer");
+                        if (n == 2) { CType ot = check_expr(p, env, e->as.call.args[1]); if (!is_integral_type(&ot)) die_at(-1, "atomic memory order must be an integer constant"); free_type(&ot); }
+                        CType r = clone_type(*pt.base); free_type(&pt); return r;
+                    }
+                    if (strcmp(name, "atomic_store") == 0) {
+                        if (n != 2 && n != 3) die_at(-1, "atomic_store expects (pointer, value[, memory_order])");
+                        CType pt = check_expr(p, env, e->as.call.args[0]);
+                        if (pt.kind != TYPE_PTR || !is_integral_type(pt.base)) die_at(-1, "atomic_store requires a pointer to an integer");
+                        CType vt = check_expr(p, env, e->as.call.args[1]);
+                        if (!types_compatible(pt.base, &vt) && !(is_integral_type(pt.base) && is_integral_type(&vt))) die_at(-1, "atomic_store value type mismatch");
+                        free_type(&vt);
+                        if (n == 3) { CType ot = check_expr(p, env, e->as.call.args[2]); if (!is_integral_type(&ot)) die_at(-1, "atomic memory order must be an integer constant"); free_type(&ot); }
+                        free_type(&pt); return type_simple(TYPE_VOID, 0, 0, "void");
+                    }
+                    if (strcmp(name, "atomic_fetch_add") == 0 || strcmp(name, "atomic_fetch_sub") == 0 || strcmp(name, "atomic_exchange") == 0) {
+                        if (n != 2 && n != 3) die_at(-1, "atomic operation expects (pointer, value[, memory_order])");
+                        CType pt = check_expr(p, env, e->as.call.args[0]);
+                        if (pt.kind != TYPE_PTR || !is_integral_type(pt.base)) die_at(-1, "atomic operation requires a pointer to an integer");
+                        CType vt = check_expr(p, env, e->as.call.args[1]);
+                        if (!is_integral_type(&vt) || !types_compatible(pt.base, &vt)) die_at(-1, "atomic operation value type mismatch");
+                        free_type(&vt);
+                        if (n == 3) { CType ot = check_expr(p, env, e->as.call.args[2]); if (!is_integral_type(&ot)) die_at(-1, "atomic memory order must be an integer constant"); free_type(&ot); }
+                        CType r = clone_type(*pt.base); free_type(&pt); return r;
+                    }
+                    if (strcmp(name, "atomic_fence") == 0) {
+                        if (n != 1) die_at(-1, "atomic_fence expects (memory_order)");
+                        CType ot = check_expr(p, env, e->as.call.args[0]); if (!is_integral_type(&ot)) die_at(-1, "atomic memory order must be an integer constant"); free_type(&ot);
+                        return type_simple(TYPE_VOID, 0, 0, "void");
+                    }
+                }
+
                 const FunctionDecl *fn = NULL;
                 for (size_t i = 0; i < p->function_count; ++i) if (strcmp(p->functions[i].name, name) == 0) { fn = &p->functions[i]; break; }
                 if (!fn) {
@@ -2407,18 +2542,41 @@ static CType check_expr(const Program *p, TypeEnv *env, const Expr *e) {
             CType b = check_expr(p, env, e->as.binary.rhs);
             const char *op = e->as.binary.op;
             if (strcmp(op, "=") == 0 || strcmp(op, "+=") == 0 || strcmp(op, "-=") == 0 ||
-                strcmp(op, "*=") == 0 || strcmp(op, "/=") == 0 || strcmp(op, "%=") == 0) {
+                strcmp(op, "*=") == 0 || strcmp(op, "/=") == 0 || strcmp(op, "%=") == 0 ||
+                strcmp(op, "&=") == 0 || strcmp(op, "|=") == 0 || strcmp(op, "^=") == 0 ||
+                strcmp(op, "<<=") == 0 || strcmp(op, ">>=") == 0) {
                 if (!expr_is_lvalue(e->as.binary.lhs)) die_at(-1, "left side of assignment must be assignable");
                 bool zero_array_init = strcmp(op, "=") == 0 && a.kind == TYPE_ARRAY &&
                                        b.kind == TYPE_INT && b.bits == 32;
-                if (!zero_array_init && !types_compatible(&a, &b)) die_at(-1, "assignment type mismatch");
-                if (strcmp(op, "=") != 0 && !is_integral_type(&a)) die_at(-1, "compound assignment requires an integer value");
+                bool pointer_step = (strcmp(op, "+=") == 0 || strcmp(op, "-=") == 0) &&
+                                     a.kind == TYPE_PTR && is_integral_type(&b);
+                if (!zero_array_init && !pointer_step && !types_compatible(&a, &b)) die_at(-1, "assignment type mismatch");
+                if (strcmp(op, "=") != 0) {
+                    if (a.kind == TYPE_PTR) {
+                        if ((strcmp(op, "+=") != 0 && strcmp(op, "-=") != 0) || !is_integral_type(&b))
+                            die_at(-1, "pointer compound assignment requires += or -= with an integer");
+                    } else if (!is_integral_type(&a) || !is_integral_type(&b)) {
+                        die_at(-1, "compound assignment requires integer values");
+                    }
+                }
                 CType r = clone_type(a); free_type(&a); free_type(&b); return r;
             }
             if (strcmp(op, "==") == 0 || strcmp(op, "!=") == 0 || strcmp(op, "<") == 0 || strcmp(op, ">") == 0 ||
                 strcmp(op, "<=") == 0 || strcmp(op, ">=") == 0 || strcmp(op, "&&") == 0 || strcmp(op, "||") == 0) {
-                if (!types_compatible(&a, &b) && !(is_integral_type(&a) && is_integral_type(&b))) die_at(-1, "incompatible operands");
+                bool pointer_compare = a.kind == TYPE_PTR && b.kind == TYPE_PTR && types_compatible(&a, &b);
+                bool integral_compare = is_integral_type(&a) && is_integral_type(&b);
+                if (!pointer_compare && !integral_compare && !types_compatible(&a, &b)) die_at(-1, "incompatible operands");
                 CType r = type_simple(TYPE_BOOL, 1, 0, "bool"); free_type(&a); free_type(&b); return r;
+            }
+            if (strcmp(op, "+") == 0) {
+                if (a.kind == TYPE_PTR && is_integral_type(&b)) { CType r = clone_type(a); free_type(&a); free_type(&b); return r; }
+                if (b.kind == TYPE_PTR && is_integral_type(&a)) { CType r = clone_type(b); free_type(&a); free_type(&b); return r; }
+            }
+            if (strcmp(op, "-") == 0) {
+                if (a.kind == TYPE_PTR && is_integral_type(&b)) { CType r = clone_type(a); free_type(&a); free_type(&b); return r; }
+                if (a.kind == TYPE_PTR && b.kind == TYPE_PTR && types_compatible(&a, &b)) {
+                    CType r = type_simple(TYPE_INT, (int)(sizeof(ptrdiff_t) * 8), 1, "isize"); free_type(&a); free_type(&b); return r;
+                }
             }
             if (!is_integral_type(&a) || !is_integral_type(&b)) die_at(-1, "arithmetic or bitwise operator requires integers");
             CType r = (a.kind == TYPE_UINT || b.kind == TYPE_UINT) ? type_simple(TYPE_UINT, a.bits > b.bits ? a.bits : b.bits, 0, "u64") : a;
@@ -2770,14 +2928,14 @@ int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], "--emit-module") == 0) {
         emit_module_mode = true;
         if (argc < 3) {
-            fprintf(stderr, "C* Compiler v0.14\nUsage: %s <file.cppo> | %s --emit-module <file.cppo> [output.cso]\n", argv[0], argv[0]);
+            fprintf(stderr, "C* Compiler v0.15\nUsage: %s <file.cppo> | %s --emit-module <file.cppo> [output.cso]\n", argv[0], argv[0]);
             return 1;
         }
         input_path = argv[2];
         if (argc >= 4) object_path_arg = argv[3];
     } else {
         if (argc < 2) {
-            fprintf(stderr, "C* Compiler v0.14\nUsage: %s <file.cppo> | %s --emit-module <file.cppo> [output.cso]\n", argv[0], argv[0]);
+            fprintf(stderr, "C* Compiler v0.15\nUsage: %s <file.cppo> | %s --emit-module <file.cppo> [output.cso]\n", argv[0], argv[0]);
             return 1;
         }
         input_path = argv[1];
@@ -2847,12 +3005,12 @@ int main(int argc, char **argv) {
             clear_symbols();
             return 1;
         }
-        printf("[C* Compiler v0.14] module built: %s + %s\n", hppo_path, cso_path);
+        printf("[C* Compiler v0.15] module built: %s + %s\n", hppo_path, cso_path);
         free(default_hppo);
         free(default_cso);
         free(stem);
     } else {
-        printf("[C* Compiler v0.14] compiled successfully, output.c generated\n");
+        printf("[C* Compiler v0.15] compiled successfully, output.c generated\n");
         if (program.link_count) {
             printf("C* module links:");
             for (size_t i = 0; i < program.link_count; ++i) printf(" %s", program.links[i].path);
